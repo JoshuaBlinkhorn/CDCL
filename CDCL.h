@@ -15,7 +15,6 @@ state_t state;
 
 // the current decision level is global
 typedef unsigned long int dec_level_t;
-dec_level_t dec_level;
 
 // initialises the solver into default state based on the given DIMACS file
 void CDCL_init(char* DIMACS_filename);
@@ -26,7 +25,7 @@ void CDCL_free();
 state_t CDCL_prop();
 // looks for a single unit clause, and returns the fist it finds, or NULL if
 // none is to be found
-int CDCL_decide();
+char CDCL_decide();
 // learns a clause after conflict, currently this is just the negation of the decision
 // assignment
 void CDCL_repair_conflict();

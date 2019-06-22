@@ -444,11 +444,11 @@ void trail_queue_lit(ass_t* lit, ass_type_t ass_type)
 {
   ass_t* comp_lit = get_comp_lit(lit);
 
-  // set the assignment ass pending
+  // queue the assignment ass at the current decision level
   lit->ass_type = ass_type;
-  lit->ass_status = PENDING;
+  lit->dec_level = dec_level;
   comp_lit->ass_type = ass_type;
-  comp_lit->ass_status = PENDING;
+  comp_lit->dec_level = dec_level;
 
   // place the assignment at the tail of the trail
   *(trail.tail) = lit;
@@ -916,12 +916,9 @@ char CDCL_decide()
   // find an unassigned var
   for (which_var = 0; which_var < num_vars; which_var++)
     {
-      if(model[which_var].ass_status == AVAILABLE)
+      if(model[which_var].dec_level == )
 	{
-	  // TODO : delete when bug free
-	  model[which_var].ass_type = DEC_ASS; 
-	  model[which_var + num_vars].ass_type = DEC_ASS;
-
+	  
 	  // put the assignment on the trail (here the assignment is always positive)
 	  trail_queue_lit(model + which_var, DEC_ASS);
 	  // update decision level
