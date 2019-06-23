@@ -26,63 +26,25 @@
 
 // MACROS
 
-// results
-#define UNSAT 0
-#define SAT 1
-
 // truth values
 #define POSITIVE 1
-#define NEGATIVE -1
+#define NEGATIVE 0
 
 // highest decision level (indicates an avaliable decision)
 #define DEC_MAX ULONG_MAX
-#define MAX_VARS ULONG_MAX / 2
+#define MAX_VARS (ULONG_MAX / 2 - 1)
 
-// assignment types
-#define DEC_ASS 0
-#define PROP_ASS 1
-#define CON_ASS 2
-
-// assignment states -- ordered as they appear on the trail
-#define DECEASED 1
-#define ACTIVE 2
-#define PENDING 3
-#define AVAILABLE 4
-
-// special values
-#define NULL_DEC_LEVEL ULONG_MAX - 1
-#define MAX_VARS ULONG_MAX / 2
-
-// low level types
-typedef unsigned char result_t;
+// native type aliases
 typedef signed char truth_value_t;
-typedef unsigned char ass_type_t;
-typedef unsigned char ass_status_t;
 typedef signed long int DIMACS_lit_t;
 typedef unsigned long int cnf_size_t;
 typedef unsigned long int model_size_t; 
 typedef unsigned long int mutable_size_t;
-typedef unsigned long int lit_t;
-typedef signed long int DIMACS_lit_t;
 
-// stats
-clock_t start_time;
-
-// higher level types 
-
-// mutable (array)
-
-// this is an automatically resized array of pointers to lit_t.
-// it can be used to store a cnf, or a list of pointers to literals (e.g. the 
-// watched literals for a singleton assignment), which can also be thought of
-// as a set of unit clauses
-
-// the array becomes twice as large whenever necessary to add an item
+// MAIN STRUCTURE OF DATA 
 
 typedef struct ass {
-  ass_status_t ass_status;
   truth_value_t truth_value;
-  ass_type_t ass_type; 
   model_size_t dec_level;
   cnf_size_t num_active;
 
@@ -99,35 +61,15 @@ typedef struct ass {
   };
 
   struct mutable watched_lits;
-
 } ass_t;
 
 typedef struct mutable mutable_t;
 typedef struct clause clause_t;
 
-// assignment
-
-// stores various information about a singleton assignment, including
-// a list of watched literals
-
-
-// clause
-
-// cnf
-
-// a CNF is a struct storing (1) an array of clauses and (2) the size of the array 
-
-typedef struct cnf {
-  clause_t* clauses;
-  cnf_size_t size;
-} cnf_t;
-
-// trail
-
-// a trail is an ordered sequence of pointers literals
-// it is allocated as a fixed size array, since it size never exceeds
-// the number of variables
-// head and tail are pointers into the array used in propagation
+// assignments are the main objects, which are treated implicitly in one-to-one 
+// correspondence with literals. A clause is a fixed size list of pointers to
+// assignments. Each assignment watches a mutable subset of the clauses in which
+// its negation appears.
 
 typedef struct trail {
   ass_t** sequence;
@@ -135,380 +77,86 @@ typedef struct trail {
   ass_t** tail;
 } trail_t;
 
-// global solver
+// the trail stores a fixed-sized array of pointers to assignments, storing the
+// current assignment and the order in which it was made
 
-// data
+typedef struct cnf {
+  clause_t* clauses;
+  cnf_size_t size;
+} cnf_t;
+
+// a cnf stores a fixed-sized array of clauses 
+
+// GLOBAL DECLARATIONS
+
+// the solver
 model_size_t num_vars;
-model_size_t num_asses;
+model_size_t num_asses; // always num_vars * 2
+cnf_t cnf;
+mutable_t learned_cnf;
+ass_t* model;
+trail_t trail;
 
-// stats variables
+// stats
+clock_t start_time;
 unsigned long num_conflicts = 0;
 unsigned long num_decisions = 0;
 unsigned long num_unit_props = 0;
 unsigned long num_redefinitions = 0;
 
-// decision pointers
-ass_t* dec_head;
-ass_t* dec_tail;
-
-// organs
-cnf_t cnf;
-mutable_t learned_cnf;
-ass_t* model;
-trail_t trail;
-state_t stat;
-
-// IMPLEMENTATION
+// HELPER FUNCTIONS
 
 void error(char* message);
 
-// LITERAL RELATED FUNCTIONS
+// literal-related
 
-ass_t* DIMACS_to_lit(DIMACS_lit_t value)
-{
-  // converts a DIMACS literal into an internal literal
-  // internal literals are represented as values from 0 to (2 * num_vars) - 1
-  // values from 0 to num_vars - 1 represent positive literals,
-  // values from num_vars to (2 * num_vars) - 1 represent negative literals.
-  return  model + ((value < 0 ? -1 : 1) * value) - 1 + ((value < 0) * num_vars);
-}
+ass_t* DIMACS_to_lit(DIMACS_lit_t value);
+DIMACS_lit_t lit_to_DIMACS(ass_t* lit);
+ass_t* get_comp_lit(ass_t* lit);
 
-DIMACS_lit_t lit_to_DIMACS(ass_t* lit)
-{
-  // converts an internal literal back into a DIMACS literal
-  // this should only ever be used for printing literal values
-  return (DIMACS_lit_t)(((lit - model) % num_vars) + 1) * (((lit - model) < num_vars) ? 1 : -1);
-}
+// clause-related
+clause_t clause_init(model_size_t width);
+void clause_free(clause_t* clause);
 
-ass_t* get_comp_lit(ass_t* lit)
-{
-  // returns the complementary literal
-  return lit + ((lit - model < num_vars? 1 : -1) * num_vars);
-}
+// mutable related
+// this is an automatically resized array of pointers to clauses.
+// the array becomes twice as large whenever necessary to add an item
+void mutable_init(mutable_t* mutable);
+void mutable_free(mutable_t* mutable);
+void mutable_free_clauses(mutable_t* mutable);
+void mutable_push(mutable_t* mutable, clause_t* datum);
+//void mutable_print_clauses(mutable_t* mutable); // write when needed
 
-void lit_print(ass_t** lit)
-{
-  //(stderr, "%lu", *lit);
-  // prints an internal literal in the form of a DIMACS literal
-  fprintf(stderr, "%ld", lit_to_DIMACS(*lit));
-}
+// assignment related
+void assign(ass_t* lit);
+void unassign(ass_t* lit);
 
+// trail related
+void trail_queue_lit(ass_t* lit, model_size_t dec_level);
 
-// CLAUSE RELATED FUNCTIONS
+// miscellaneous
+void report_SAT();
+void report_UNSAT();
 
-clause_t clause_init(model_size_t width)
-{
-  // initialises a clause of size `width'
-  // the fist `literal' is the size of the clause 
-  clause_t clause;
-
-  clause.width = width;
-  if ((clause.lits = (ass_t**)malloc(sizeof(ass_t*) * (width))) == NULL)
-    error("cannot allocate clause literals");
-
-  return clause;
-}
-
-char clause_is_unit(clause_t* clause)
-{
-  // returns 1 if the given clause is a unit clause, 0 otherwise
-  return (clause->width == 1) ? 1 : 0;
-}
-
-void clause_free(clause_t* clause)
-{
-  free(clause->lits);
-}
-
-void clause_print(clause_t* clause)
-{
-  model_size_t num_lits = clause->width;
-  model_size_t which_lit;
-
-  for(which_lit = 0; which_lit < num_lits; which_lit++)
-    {
-      lit_print(clause->lits + which_lit);
-      fprintf(stderr, " ");
-    }
-}
-
-// CNF RELATED FUNCTIONS
-
-void cnf_print()
-{
-  cnf_size_t which_clause;
-  
-  fprintf(stderr, "FORMULA:\n");
-  for(which_clause = 0; which_clause < cnf.size; which_clause++)
-    {
-      clause_print(cnf.clauses + which_clause);
-      fprintf(stderr, "\n");
-    }
-}
-
-
-// MUTABLE RELATED FUNCTIONS
-
-void mutable_init(mutable_t* mutable)
-{
-  // allocate memory for data - default size is 1
-  if ((mutable->data = (clause_t**)malloc(sizeof(clause_t*))) == NULL)
-    error("cannot allocate mutable data");
-
-  // set default member values
-  mutable->size = 1L;
-  mutable->used = 0L;
-}
-
-// use this to free a watched literal list
-void mutable_free(mutable_t* mutable)
-{
-  // frees only the data of the pointed to mutable
-  free(mutable->data);
-}
-
-// use this to free learned cnf
-void mutable_free_clauses(mutable_t* mutable)
-{
-  // frees both the data of the pointed to mutable, and the clauses
-  // that the data points to
-  cnf_size_t which_clause, num_clauses;
-
-  num_clauses = mutable->used;
-  for(which_clause = 0; which_clause < num_clauses; which_clause++)
-    clause_free((clause_t*)*(mutable->data + which_clause));
-  free(mutable->data);
-}
-
-void mutable_push(mutable_t* mutable, clause_t* datum)
-{
-  // pushes the datum onto the mutable's data array
-  mutable_size_t size;
-
-  if (mutable->used == (size = mutable->size))
-    {
-      if ((mutable->data = 
-	   (clause_t**)realloc(mutable->data, 2 * size * sizeof(clause_t*))) == NULL)
-	error("cannot reallocate mutable data");
-      mutable->size = 2 * size;
-      mutable->data[mutable->used++] = datum;
-    }
-  else
-    {
-      mutable->data[mutable->used++] = datum;      
-    }
-}
-
-// use to print a learned cnf
-void mutable_print_clauses(mutable_t* mutable)
-{
-  mutable_size_t which_clause, num_clauses;
-  clause_t** data;
-  
-  fprintf(stderr, "LEARNED CLAUSES:\n");
-  fprintf(stderr, "size: %lu, used: %lu\n", mutable->size, mutable->used);
-
-  num_clauses = mutable->used;
-  data = mutable->data;
-  for(which_clause = 0; which_clause < num_clauses; which_clause++)
-    {
-      clause_print(data[which_clause]);
-      fprintf(stderr, "\n");
-    }
-}
-
-
-/*
-// use to print a watched literal list // TODO deprecate, or hone for debugginf
-void mutable_print_lits(mutable_t* mutable)
-{
-  mutable_size_t which_lit, num_lits;
-  lit_t** data;
-  
-  fprintf(stderr, "size: %lu, used: %lu, literals:", mutable->size, mutable->used);
-
-  num_lits = mutable->used;
-  data = mutable->data;
-  for(which_lit = 0; which_lit < num_lits; which_lit++)
-    {
-      lit_print(data + which_lit);
-    }
-  fprintf(stderr, "\n");
-}
-
-*/
-void print_watched_lits() // TODO deprecate, or hone for debugging
-{
-  model_size_t which_ass;
-  cnf_size_t which_clause;
-  ass_t* temp_ass;
-  
-  for (which_ass = 0; which_ass < num_vars * 2; which_ass++)
-    {
-      temp_ass = model + which_ass;
-      fprintf(stderr, "WATCHED LITERALS for literal %ld\n", lit_to_DIMACS(temp_ass));
-      for (which_clause = 0; which_clause < temp_ass->watched_lits.used; which_clause++)
-	{
-	  clause_print(temp_ass->watched_lits.data[which_clause]);
-	  fprintf(stderr, "\n");
-	}
-    }
-  fprintf(stderr, "\n");
-}
-
-// ASSIGNMENT RELATED FUNCTIONS
-
-void assign(ass_t* lit)
-{
-  // overwrites the assignment satisfying the literal into the model
-  // the assignment type should already have been set when the literal
-  // was added to the trail
-  ass_t* comp_lit = get_comp_lit(lit);
-
-  lit->truth_value = POSITIVE;
-  comp_lit->truth_value = NEGATIVE;
-}
-
-void unassign(ass_t* lit)
-{
-  // unassigns the variable for this literal (i.e. for the literal and its complement)
-  lit->dec_level = DEC_MAX;
-  get_comp_lit(lit)->dec_level = DEC_MAX;
-}
-
-// prints the value of an assignment and its decision level
-void ass_print(ass_t* ass)
-{
-  if(ass->dec_level != DEC_MAX)
-    {
-      fprintf(stderr, "%d / %lu ", ass->truth_value, ass->dec_level);
-      
-      /* TODO: delete if ass_type is deprecated
-      switch(ass->ass_type)
-	{
-	case DEC_ASS:
-	  fprintf(stderr, "D ");
-	  break;
-	case PROP_ASS:
-	  fprintf(stderr, "P ");
-	  break;
-	case CON_ASS:
-	  fprintf(stderr, "C ");
-	  break;
-	default:
-	  break;
-	}
-      */
-    }
-}
-
-// this function assumes trail.head > trail.sequence
-void backtrack(model_size_t new_dec_level)
-{  
-  DEBUG_MSG(fprintf(stderr,
-		    "In backtrack(). Backtracking to decision level %lu.\n",
-		    new_dec_level));
-  // go backwards through the trail and delete the assignments
-  while((trail.tail >= trail.sequence) && ((*(trail.tail))->dec_level > new_dec_level))
-    {
-      unassign(*trail.tail);
-      trail.tail--;
-    }
-  trail.tail++;
-  trail.head = trail.tail;
-}
-
-// MODEL RELATED FUNCTIONS
-
-// prints the contents of the given model
-void print_model()
-{
-  model_size_t which_var;
-
-  fprintf(stderr, "MODEL:\n");      
-    
-  // print the assignment
-  for(which_var = 0; which_var < num_vars; which_var++)
-    {
-      fprintf(stderr, "%lu: ", which_var + 1);
-      ass_print(model + which_var);
-      fprintf(stderr, "\n");
-    }
-  fprintf(stderr, "\n");
-}
- 
-// TRAIL RELATED FUNCTIONS
-
-void trail_queue_lit(ass_t* lit, model_size_t dec_level)
-{
-  ass_t* comp_lit = get_comp_lit(lit);
-
-  // queue assignment at current decision level
-  lit->dec_level = dec_level;
-  lit->truth_value = POSITIVE;
-  comp_lit->dec_level = dec_level;
-  comp_lit->truth_value = NEGATIVE;
-
-  // place assignment at tail of trail
-  *(trail.tail) = lit;
-  trail.tail++;
-}
-
-void print_trail()
-{
-  ass_t** temp_pointer;
-
-  fprintf(stderr, "TRAIL: ");
-
-  if (trail.sequence == trail.tail) 
-    {
-      fprintf(stderr, " (empty)\n\n");
-      return;
-    }
-  fprintf(stderr, "\n");
-  for(temp_pointer = trail.sequence; temp_pointer < trail.tail; temp_pointer++)
-    {
-      fprintf(stderr, "%lu: %ld / %lu",
-	      temp_pointer - trail.sequence + 1,
-	      lit_to_DIMACS(*temp_pointer),
-	      (*temp_pointer)->dec_level);
-      if (temp_pointer == trail.head) fprintf(stderr, " HEAD");
-      if (temp_pointer == trail.tail) fprintf(stderr, " TAIL");
-      fprintf(stderr, "\n");
-    }
-  fprintf(stderr, "\n");
-}
+// printing and debugging
+void print_lit(ass_t** lit);
+void print_clause(clause_t* clause);
+void print_cnf();
+void print_ass(ass_t* ass);
+void print_watched_lits();
+void print_model();
+void print_trail();
+void print_stats();
 
 // CDCL INTERFACE IMPLEMENTATION
 
-void  CDCL_print_stats()
-{
-  fprintf(stderr, "Conflicts:         %lu\n", num_conflicts);
-  fprintf(stderr, "Decisions:         %lu\n", num_decisions);
-  fprintf(stderr, "Unit Propagations: %lu\n", num_unit_props);
-  //fprintf(stderr, "Redefinitions:     %lu\n", num_redefinitions);
-  fprintf(stderr, "%1.1lfs ", ((double)(clock() - start_time)) / CLOCKS_PER_SEC);
-  fprintf(stderr, "%1.1zdMb ", getPeakRSS() / 1048576);
-  fprintf(stderr, "\n");
-}
-
-void CDCL_report_SAT()
-{
-  print_model();
-  fprintf(stderr, "v SAT\n");
-  CDCL_print_stats();
-  exit(0);
-}
-void CDCL_report_UNSAT()
-{
-  fprintf(stderr, "v UNSAT\n");
-  CDCL_print_stats();
-  exit(0);
-}
-
-// initialises global solver according to the DIMACS file 'input'.
 void CDCL_init(char* DIMACS_filename)
 {
+  
+// initialises global solver according to the DIMACS file 'input'.
+// all data structures are initialised and all initial memory allocated
+// unit clauses found while reading the input are placed on the trail.
+
   FILE* input, *cursor;
   char buffer[5]; // used only to read the `cnf' string from the input file
   char ch; // used to read single characters from the input file  
@@ -521,7 +169,6 @@ void CDCL_init(char* DIMACS_filename)
   ass_t* lit;
 
   start_time = clock();
-  state = DECIDE;
 
   // open file connections
   // TODO: currently using two file connections to find size of clauses before writing
@@ -548,7 +195,7 @@ void CDCL_init(char* DIMACS_filename)
     error("bad input - number of vars missing");
   fscanf(cursor, "%lu", &(num_vars));
 
-  if (num_vars > pow(2,(sizeof(lit_t) * 8) - 3) - 1) // i.e. more variables than our data type can handle
+  if (num_vars > MAX_VARS) // i.e. more variables than our data type can handle
     error("too many vars");
   num_asses = num_vars * 2;
 
@@ -576,12 +223,12 @@ void CDCL_init(char* DIMACS_filename)
 
   if (cnf.size == 0)
     {
-      CDCL_report_SAT();
+      report_SAT();
       exit(0);
     }
   if (num_vars == 0)
     {
-      CDCL_report_UNSAT();
+      report_UNSAT();
       exit(0);
     }
 
@@ -600,7 +247,7 @@ void CDCL_init(char* DIMACS_filename)
       // if the width is 0, note that the formula is UNSAT and return
       if (width == 0)
 	{
-	  CDCL_report_UNSAT();
+	  report_UNSAT();
 	  exit(0);
 	}
 
@@ -610,7 +257,6 @@ void CDCL_init(char* DIMACS_filename)
 	  fscanf(input, "%ld", &DIMACS_lit);
 	  trail_queue_lit(DIMACS_to_lit(DIMACS_lit), 0);
 	  fscanf(input, "%ld", &DIMACS_lit);
-	  state = PROPAGATE;
 	  // we do not store unit clauses, so decrement counters
 	  cnf.size--;
 	  which_clause--;
@@ -647,6 +293,9 @@ void CDCL_init(char* DIMACS_filename)
 
 void CDCL_free()
 {
+  // this function probably never needs to be called
+  // the OS can clean up when the program returns
+
   cnf_size_t which_clause;
   model_size_t which_ass;
 
@@ -667,33 +316,13 @@ void CDCL_free()
   free(trail.sequence);
 }
 
-// TODO: the watched literals should be the first two in the clause
-// then we can deal with them by swapping them explicitly with some other literal,
-// if possible
-
-// handles the entire propagation cycle in a single function
-
-// head should immediately precede tail of the trail when this function
-// is called,
-// in case of conflict, tail will exceed head when it returns 
-// otherwise tail and head will be identical
-
-// this function is responsible for all watched literals handling, except for the
-// assignment of inital watched literals of learned clause, which is handled
-// by conflict analysis
-
-// the assignment at head when the function is called is handled first
-// the watched literals are visited in order
-// the function first attemps to push the watch to another literal
-// if the clause is found to be unit, the assignment is checked for conflict
-// if conflict is found, the watched literals for the current assignment are
-// cleaned up and the function returns CONFLICT
-// if no conflict is found, the unit assignment is added to the tail of the trail
-// when all clauses have been visited, the trail head is incremented
-// the function returns NO_CONFLICT when head and tail are again identical
-
-state_t CDCL_prop()
+void CDCL_prop()
 {
+  // handles the entire propagation cycle in a single function
+  // terminates when head and tail trail pointers coincide
+  
+  // this function is responsible for all watched literal handling,
+  // conflict detection and backtracking in the current version
 
   ass_t* temp_lit;
   model_size_t which_lit, candidate;
@@ -704,7 +333,6 @@ state_t CDCL_prop()
   clause_t** data;
   clause_t* clause;
   model_size_t dec_level;
-  //ass_t* ass;
 
   DEBUG_MSG(fprintf(stderr, "In CDCL_prop()..\n"));
   
@@ -749,7 +377,7 @@ state_t CDCL_prop()
 		}
 
 	      DEBUG_MSG(fprintf(stderr, "Dealing with clause: "));
-	      DEBUG_MSG(clause_print(clause));
+	      DEBUG_MSG(print_clause(clause));
 	      DEBUG_MSG(fprintf(stderr, " -> "));
 	      
 	      // the first case to deal with: the other watched literal is POSITIVE
@@ -772,7 +400,7 @@ state_t CDCL_prop()
 		      // otherwise, preserve the watched literal
 		      mutable_push(&new_watchers, clause);
 		      
-		      DEBUG_MSG(clause_print(clause));
+		      DEBUG_MSG(print_clause(clause));
 		      DEBUG_MSG(fprintf(stderr, 
 					" (no change - other watched literal is satisfied)\n"));
 		    }
@@ -817,7 +445,7 @@ state_t CDCL_prop()
 			      // at level 0 the conflict is fatal
 			      if (dec_level == 0)
 				{
-				  CDCL_report_UNSAT();
+				  report_UNSAT();
 				  exit(0);
 				}
 			      
@@ -869,7 +497,7 @@ state_t CDCL_prop()
 		      mutable_push(&(get_comp_lit(lits[0])->watched_lits),
 				   clause);
 		      
-		      DEBUG_MSG(clause_print(clause));
+		      DEBUG_MSG(print_clause(clause));
 		      DEBUG_MSG(fprintf(stderr, "\n"));		      
 		    }
 		}
@@ -893,17 +521,17 @@ state_t CDCL_prop()
   DEBUG_MSG(fprintf(stderr,"Propagation cycle complete.\n"));
   DEBUG_MSG(print_model());
   DEBUG_MSG(print_trail());
-  return DECIDE;
+  return;
 }
 		  
-// easy decision heuristic: assigns the first unassigned variable positively 
-// trail.head and trail.tail are always equal when CDCL_decide() is called
-// and point to the location after the final assignment
-// if the function returns PROPAGATE, trail.head points to the location of
-// the final assignment, trail.tail to the next location.  
-
-char CDCL_decide()
+void CDCL_decide()
 {
+  // easy decision heuristic: selects the first unassigned variable positively 
+  // and places it on the trail
+
+  // trail head and tail should be equal when this function is called
+  // and when it returns
+
   model_size_t which_var;
   model_size_t dec_level;
 
@@ -911,7 +539,7 @@ char CDCL_decide()
 
   if (trail.head == trail.sequence + num_vars)
     {
-      CDCL_report_SAT();
+      report_SAT();
       exit(0);
     }
 
@@ -935,67 +563,22 @@ char CDCL_decide()
 	  DEBUG_MSG(print_model());
 	  DEBUG_MSG(print_trail());
 	  
-	  return PROPAGATE;
+	  return;
 	}	
     }
   DEBUG_MSG(fprintf(stderr, "No decision possible.\n"));
-  return SUCCESS;
+  return;
 }
-
-
-// the simplest clause learning: DPLL-style
-// learn clauses that encode DPLL brandhing
-/*
-void CDCL_repair_conflict()
-{
-  clause_t learned_clause;
-  model_size_t which_var;
-
-  DEBUG_MSG(fprintf(stderr, "In CDCL_repair_conflict."));
-  
-  num_conflicts++;
-  if (dec_level == 0) CDCL_report_UNSAT();
-
-  // decision level 1 is a special case - no clause actually need be learned
-  if (dec_level != 1)
-    {
-      // construct the learned clause
-      learned_clause = clause_init(dec_level);
-      for (which_var = 0; which_var < num_vars; which_var++)
-	{
-	  if((model[which_var].ass_status != AVAILABLE) &&
-	     (model[which_var].ass_type == DEC_ASS))
-	    {
-	      // put the highest decision level literals first
-	      learned_clause.lits[dec_level - model[which_var].dec_level] = 
-		(model[which_var].truth_value == POSITIVE) ? 
-		get_comp_lit(model + which_var) : model + which_var;
-	    }
-	}
-      DEBUG_MSG(fprintf(stderr, "Learned clause: "));
-      DEBUG_MSG(clause_print(&learned_clause));
-      DEBUG_MSG(fprintf(stderr, "\n"));
-      // watch the highest level literals in the clause
-      mutable_push(&(get_comp_lit(learned_clause.lits[0])->watched_lits), &learned_clause);
-      mutable_push(&(get_comp_lit(learned_clause.lits[1])->watched_lits), &learned_clause);
-      // add clause to the formula
-      mutable_push(&learned_cnf, &learned_clause);
-    }
-  // note that backtracking leaves the head pointing to the last decision assignment.
-  // backtrack, and add the negation of the last decision (as PROP_ASS) to the trail
-  backtrack(dec_level - 1);
-  trail_queue_lit(get_comp_lit(*(trail.head)), dec_level - 1);
-}
-*/
 
 void CDCL_print()
 {
-  cnf_print();
+  print_cnf();
   fprintf(stderr, "\n");
-  mutable_print_clauses(&learned_cnf);
   print_model();
   print_trail();
 }
+
+// HELPER FUNCTION IMPLEMENTATION
 
 //  error function implementation
 void error(char* message)
@@ -1003,3 +586,262 @@ void error(char* message)
   fprintf(stderr, "FATAL ERROR: %s.\n", message);
   exit(1);
 }
+
+// literal related
+
+ass_t* DIMACS_to_lit(DIMACS_lit_t value)
+{
+  // converts a DIMACS literal into an internal literal
+  return  model + ((value < 0 ? -1 : 1) * value) - 1 + ((value < 0) * num_vars);
+}
+
+DIMACS_lit_t lit_to_DIMACS(ass_t* lit)
+{
+  // converts an internal literal back into a DIMACS literal
+  // this should only ever be used for printing or debugging
+  return (DIMACS_lit_t)(((lit - model) % num_vars) + 1) * (((lit - model) < num_vars) ? 1 : -1);
+}
+
+ass_t* get_comp_lit(ass_t* lit)
+{
+  // returns the complementary literal
+  return lit + ((lit - model < num_vars? 1 : -1) * num_vars);
+}
+
+// clause related
+
+clause_t clause_init(model_size_t width)
+{
+  // initialises a clause of size `width'
+  // the fist `literal' is the size of the clause 
+  clause_t clause;
+
+  clause.width = width;
+  if ((clause.lits = (ass_t**)malloc(sizeof(ass_t*) * (width))) == NULL)
+    error("cannot allocate clause literals");
+
+  return clause;
+}
+
+void clause_free(clause_t* clause)
+{
+  free(clause->lits);
+}
+
+// cnf related
+
+void print_cnf()
+{
+  cnf_size_t which_clause;
+  
+  fprintf(stderr, "FORMULA:\n");
+  for(which_clause = 0; which_clause < cnf.size; which_clause++)
+    {
+      print_clause(cnf.clauses + which_clause);
+      fprintf(stderr, "\n");
+    }
+}
+
+// mutable related
+
+void mutable_init(mutable_t* mutable)
+{
+  // allocate memory for data - default size is 1
+  if ((mutable->data = (clause_t**)malloc(sizeof(clause_t*))) == NULL)
+    error("cannot allocate mutable data");
+
+  // set default member values
+  mutable->size = 1L;
+  mutable->used = 0L;
+}
+
+// use this to free a watched literal list
+void mutable_free(mutable_t* mutable)
+{
+  // frees only the data of the pointed to mutable
+  free(mutable->data);
+}
+
+// use this to free learned cnf
+void mutable_free_clauses(mutable_t* mutable)
+{
+  // frees both the data of the pointed to mutable, and the clauses
+  // that the data points to
+  cnf_size_t which_clause, num_clauses;
+
+  num_clauses = mutable->used;
+  for(which_clause = 0; which_clause < num_clauses; which_clause++)
+    clause_free((clause_t*)*(mutable->data + which_clause));
+  free(mutable->data);
+}
+
+void mutable_push(mutable_t* mutable, clause_t* datum)
+{
+  // pushes the datum onto the mutable's data array
+  mutable_size_t size;
+
+  if (mutable->used == (size = mutable->size))
+    {
+      if ((mutable->data = 
+	   (clause_t**)realloc(mutable->data, 2 * size * sizeof(clause_t*))) == NULL)
+	error("cannot reallocate mutable data");
+      mutable->size = 2 * size;
+      mutable->data[mutable->used++] = datum;
+    }
+  else
+    {
+      mutable->data[mutable->used++] = datum;      
+    }
+}
+
+// assignment related
+
+void assign(ass_t* lit)
+{
+  // TODO: pass the decision level also to this function
+  // overwrites the assignment satisfying the literal into the model
+  ass_t* comp_lit = get_comp_lit(lit);
+
+  lit->truth_value = POSITIVE;
+  comp_lit->truth_value = NEGATIVE;
+}
+
+void unassign(ass_t* lit)
+{
+  // unassigns the variable for this literal (i.e. for the literal and its complement)
+  lit->dec_level = DEC_MAX;
+  get_comp_lit(lit)->dec_level = DEC_MAX;
+}
+
+// trail related
+
+void trail_queue_lit(ass_t* lit, model_size_t dec_level)
+{
+  ass_t* comp_lit = get_comp_lit(lit);
+
+  // queue assignment at current decision level
+  lit->dec_level = dec_level;
+  lit->truth_value = POSITIVE;
+  comp_lit->dec_level = dec_level;
+  comp_lit->truth_value = NEGATIVE;
+
+  // place assignment at tail of trail
+  *(trail.tail) = lit;
+  trail.tail++;
+}
+
+// miscellaneous
+
+void report_SAT()
+{
+  print_model();
+  fprintf(stderr, "v SAT\n");
+  print_stats();
+  exit(0);
+}
+void report_UNSAT()
+{
+  fprintf(stderr, "v UNSAT\n");
+  print_stats();
+  exit(0);
+}
+
+// printing and debugging
+
+void print_lit(ass_t** lit)
+{
+  //(stderr, "%lu", *lit);
+  // prints an internal literal in the form of a DIMACS literal
+  fprintf(stderr, "%ld", lit_to_DIMACS(*lit));
+}
+
+void print_clause(clause_t* clause)
+{
+  model_size_t num_lits = clause->width;
+  model_size_t which_lit;
+
+  for(which_lit = 0; which_lit < num_lits; which_lit++)
+    {
+      print_lit(clause->lits + which_lit);
+      fprintf(stderr, " ");
+    }
+}
+
+void print_watched_lits()
+{
+  model_size_t which_ass;
+  cnf_size_t which_clause;
+  ass_t* temp_ass;
+  
+  for (which_ass = 0; which_ass < num_vars * 2; which_ass++)
+    {
+      temp_ass = model + which_ass;
+      fprintf(stderr, "WATCHED LITERALS for literal %ld\n", lit_to_DIMACS(temp_ass));
+      for (which_clause = 0; which_clause < temp_ass->watched_lits.used; which_clause++)
+	{
+	  print_clause(temp_ass->watched_lits.data[which_clause]);
+	  fprintf(stderr, "\n");
+	}
+    }
+  fprintf(stderr, "\n");
+}
+
+void print_model()
+{
+  model_size_t which_var;
+
+  fprintf(stderr, "MODEL:\n");      
+    
+  // print the assignment
+  for(which_var = 0; which_var < num_vars; which_var++)
+    {
+      fprintf(stderr, "%lu: ", which_var + 1);
+      print_ass(model + which_var);
+      fprintf(stderr, "\n");
+    }
+  fprintf(stderr, "\n");
+}
+
+// prints the value of an assignment and its decision level
+void print_ass(ass_t* ass)
+{
+  if(ass->dec_level != DEC_MAX)
+      fprintf(stderr, "%d / %lu ", ass->truth_value, ass->dec_level);
+}
+
+void print_trail()
+{
+  ass_t** temp_pointer;
+
+  fprintf(stderr, "TRAIL: ");
+
+  if (trail.sequence == trail.tail) 
+    {
+      fprintf(stderr, " (empty)\n\n");
+      return;
+    }
+  fprintf(stderr, "\n");
+  for(temp_pointer = trail.sequence; temp_pointer < trail.tail; temp_pointer++)
+    {
+      fprintf(stderr, "%lu: %ld / %lu",
+	      temp_pointer - trail.sequence + 1,
+	      lit_to_DIMACS(*temp_pointer),
+	      (*temp_pointer)->dec_level);
+      if (temp_pointer == trail.head) fprintf(stderr, " HEAD");
+      if (temp_pointer == trail.tail) fprintf(stderr, " TAIL");
+      fprintf(stderr, "\n");
+    }
+  fprintf(stderr, "\n");
+}
+
+void  print_stats()
+{
+  fprintf(stderr, "Conflicts:         %lu\n", num_conflicts);
+  fprintf(stderr, "Decisions:         %lu\n", num_decisions);
+  fprintf(stderr, "Unit Propagations: %lu\n", num_unit_props);
+  //fprintf(stderr, "Redefinitions:     %lu\n", num_redefinitions);
+  fprintf(stderr, "%1.1lfs ", ((double)(clock() - start_time)) / CLOCKS_PER_SEC);
+  fprintf(stderr, "%1.1zdMb ", getPeakRSS() / 1048576);
+  fprintf(stderr, "\n");
+}
+

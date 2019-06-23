@@ -9,12 +9,10 @@
 int main(int argc, char** argv)
 {  
   CDCL_init(argv[1]);
-
-  if(state == PROPAGATE)
-    CDCL_prop();
-
-  while(CDCL_decide() != SUCCESS)
-    CDCL_prop();
-
+  while(1)
+    {
+      CDCL_prop();
+      CDCL_decide();
+    }
   return 0;
 }
