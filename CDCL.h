@@ -13,9 +13,6 @@
 typedef unsigned char state_t;
 state_t state;
 
-// the current decision level is global
-typedef unsigned long int dec_level_t;
-
 // initialises the solver into default state based on the given DIMACS file
 void CDCL_init(char* DIMACS_filename);
 // deallocates all memory allocated during the CDCL process

@@ -10,19 +10,11 @@ int main(int argc, char** argv)
 {  
   CDCL_init(argv[1]);
 
-  CDCL_print();
-
   if(state == PROPAGATE)
     CDCL_prop();
 
   while(CDCL_decide() != SUCCESS)
-    {
-      while (CDCL_prop() == CONFLICT)
-	{
-	  CDCL_repair_conflict();	    
-	}
-    }
-  CDCL_report_SAT();
-  // CDCL_free(); not needed as the previous line exits
+    CDCL_prop();
+
   return 0;
 }

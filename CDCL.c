@@ -36,7 +36,7 @@
 
 // highest decision level (indicates an avaliable decision)
 #define DEC_MAX ULONG_MAX
-#define MAX_VARS ULONG_MAX
+#define MAX_VARS ULONG_MAX / 2
 
 // assignment types
 #define DEC_ASS 0
@@ -83,7 +83,7 @@ typedef struct ass {
   ass_status_t ass_status;
   truth_value_t truth_value;
   ass_type_t ass_type; 
-  dec_level_t dec_level;
+  model_size_t dec_level;
   cnf_size_t num_active;
 
   struct mutable {
@@ -138,7 +138,6 @@ typedef struct trail {
 // global solver
 
 // data
-dec_level_t dec_level = 0;
 model_size_t num_vars;
 model_size_t num_asses;
 
@@ -231,7 +230,6 @@ void clause_print(clause_t* clause)
       lit_print(clause->lits + which_lit);
       fprintf(stderr, " ");
     }
-  fprintf(stderr, " 0\n");
 }
 
 // CNF RELATED FUNCTIONS
@@ -244,6 +242,7 @@ void cnf_print()
   for(which_clause = 0; which_clause < cnf.size; which_clause++)
     {
       clause_print(cnf.clauses + which_clause);
+      fprintf(stderr, "\n");
     }
 }
 
@@ -337,19 +336,25 @@ void mutable_print_lits(mutable_t* mutable)
   fprintf(stderr, "\n");
 }
 
+*/
 void print_watched_lits() // TODO deprecate, or hone for debugging
 {
   model_size_t which_ass;
-
-  fprintf(stderr, "WATCHED LITERALS\n");
-  for (which_ass = 0; which_ass < num_asses; which_ass++)
+  cnf_size_t which_clause;
+  ass_t* temp_ass;
+  
+  for (which_ass = 0; which_ass < num_vars * 2; which_ass++)
     {
-      mutable_print_lits(&(model[which_ass].watched_lits));
+      temp_ass = model + which_ass;
+      fprintf(stderr, "WATCHED LITERALS for literal %ld\n", lit_to_DIMACS(temp_ass));
+      for (which_clause = 0; which_clause < temp_ass->watched_lits.used; which_clause++)
+	{
+	  clause_print(temp_ass->watched_lits.data[which_clause]);
+	  fprintf(stderr, "\n");
+	}
     }
   fprintf(stderr, "\n");
 }
-
-*/
 
 // ASSIGNMENT RELATED FUNCTIONS
 
@@ -361,9 +366,7 @@ void assign(ass_t* lit)
   ass_t* comp_lit = get_comp_lit(lit);
 
   lit->truth_value = POSITIVE;
-  lit->dec_level = dec_level;
   comp_lit->truth_value = NEGATIVE;
-  comp_lit->dec_level = dec_level;
 }
 
 void unassign(ass_t* lit)
@@ -376,11 +379,9 @@ void unassign(ass_t* lit)
 // prints the value of an assignment and its decision level
 void ass_print(ass_t* ass)
 {
-  if(ass->dec_level == DEC_MAX)
-    fprintf(stderr, "0");
-  else
+  if(ass->dec_level != DEC_MAX)
     {
-      fprintf(stderr, "%2d / %lu ", ass->truth_value, ass->dec_level);
+      fprintf(stderr, "%d / %lu ", ass->truth_value, ass->dec_level);
       
       /* TODO: delete if ass_type is deprecated
       switch(ass->ass_type)
@@ -402,21 +403,19 @@ void ass_print(ass_t* ass)
 }
 
 // this function assumes trail.head > trail.sequence
-void backtrack(dec_level_t new_dec_level)
+void backtrack(model_size_t new_dec_level)
 {  
   DEBUG_MSG(fprintf(stderr,
 		    "In backtrack(). Backtracking to decision level %lu.\n",
 		    new_dec_level));
   // go backwards through the trail and delete the assignments
-  while((trail.head >= trail.sequence) && ((*(trail.head))->dec_level > new_dec_level))
+  while((trail.tail >= trail.sequence) && ((*(trail.tail))->dec_level > new_dec_level))
     {
-      unassign(*trail.head);
-      trail.head--;
+      unassign(*trail.tail);
+      trail.tail--;
     }
-  trail.head++;
-  trail.tail = trail.head;
-  //revert to given decision level
-  dec_level = new_dec_level;
+  trail.tail++;
+  trail.head = trail.tail;
 }
 
 // MODEL RELATED FUNCTIONS
@@ -440,17 +439,17 @@ void print_model()
  
 // TRAIL RELATED FUNCTIONS
 
-void trail_queue_lit(ass_t* lit, ass_type_t ass_type)
+void trail_queue_lit(ass_t* lit, model_size_t dec_level)
 {
   ass_t* comp_lit = get_comp_lit(lit);
 
-  // set the assignment ass pending
-  lit->ass_type = ass_type;
-  lit->ass_status = PENDING;
-  comp_lit->ass_type = ass_type;
-  comp_lit->ass_status = PENDING;
+  // queue assignment at current decision level
+  lit->dec_level = dec_level;
+  lit->truth_value = POSITIVE;
+  comp_lit->dec_level = dec_level;
+  comp_lit->truth_value = NEGATIVE;
 
-  // place the assignment at the tail of the trail
+  // place assignment at tail of trail
   *(trail.tail) = lit;
   trail.tail++;
 }
@@ -469,27 +468,12 @@ void print_trail()
   fprintf(stderr, "\n");
   for(temp_pointer = trail.sequence; temp_pointer < trail.tail; temp_pointer++)
     {
-      fprintf(stderr, "%lu: %ld ",
+      fprintf(stderr, "%lu: %ld / %lu",
 	      temp_pointer - trail.sequence + 1,
-	      lit_to_DIMACS(*temp_pointer));
-      if ((*temp_pointer)->ass_status == PENDING)
-	fprintf(stderr, "W ");
-      else switch((*temp_pointer)->ass_type)
-	     {
-	     case DEC_ASS:
-	       fprintf(stderr, "D ");
-	       break;
-	     case PROP_ASS:
-	       fprintf(stderr, "P ");
-	       break;	
-	     case CON_ASS:
-	       fprintf(stderr, "C ");
-	       break;	
-	     default:
-	       break;
-	     }
-      if (temp_pointer == trail.head) fprintf(stderr, "HEAD");
-      if (temp_pointer == trail.tail) fprintf(stderr, "TAIL");
+	      lit_to_DIMACS(*temp_pointer),
+	      (*temp_pointer)->dec_level);
+      if (temp_pointer == trail.head) fprintf(stderr, " HEAD");
+      if (temp_pointer == trail.tail) fprintf(stderr, " TAIL");
       fprintf(stderr, "\n");
     }
   fprintf(stderr, "\n");
@@ -510,7 +494,7 @@ void  CDCL_print_stats()
 
 void CDCL_report_SAT()
 {
-  //print_model();
+  print_model();
   fprintf(stderr, "v SAT\n");
   CDCL_print_stats();
   exit(0);
@@ -574,7 +558,7 @@ void CDCL_init(char* DIMACS_filename)
   for (which_ass = 0; which_ass < num_asses; which_ass++)
     {
       // set default values and initialise watched literals mutable for each assignment
-      model[which_ass].ass_status = AVAILABLE; 
+      model[which_ass].dec_level = DEC_MAX; 
       model[which_ass].num_active = 0;
       mutable_init(&(model[which_ass].watched_lits));
     }
@@ -624,7 +608,7 @@ void CDCL_init(char* DIMACS_filename)
       if (width == 1)
 	{
 	  fscanf(input, "%ld", &DIMACS_lit);
-	  trail_queue_lit(DIMACS_to_lit(DIMACS_lit), PROP_ASS);
+	  trail_queue_lit(DIMACS_to_lit(DIMACS_lit), 0);
 	  fscanf(input, "%ld", &DIMACS_lit);
 	  state = PROPAGATE;
 	  // we do not store unit clauses, so decrement counters
@@ -657,8 +641,6 @@ void CDCL_init(char* DIMACS_filename)
 	}
     }
   
-  // set default decision level
-  dec_level = 0;
   // initialise empty learned clause list
   mutable_init(&(learned_cnf));
 }
@@ -714,26 +696,29 @@ state_t CDCL_prop()
 {
 
   ass_t* temp_lit;
-  model_size_t which_lit;
+  model_size_t which_lit, candidate;
   ass_t** lits;
   cnf_size_t num_clauses, which_clause;
   mutable_t new_watchers;
   ass_t* propagator;
   clause_t** data;
   clause_t* clause;
-  char clause_is_unit, clause_is_extinct;
+  model_size_t dec_level;
   //ass_t* ass;
 
   DEBUG_MSG(fprintf(stderr, "In CDCL_prop()..\n"));
   
   while (trail.head != trail.tail)
     {
-      // store the literal that we are propagating
+      // make a local copy of the literal that we are propagating
       propagator = *(trail.head);
+      dec_level = propagator->dec_level;
       
       // add the propagating assignment to the model, set all successive additions
       // as propagations
-      assign(propagator);
+      //assign(propagator);
+      DEBUG_MSG(print_model());
+      DEBUG_MSG(print_trail());
       
       // make a local pointer to the list of watched literals, and get the list size 
       data = propagator->watched_lits.data;
@@ -751,150 +736,163 @@ state_t CDCL_prop()
 	  // get the literals and the clause width
 	  clause = data[which_clause];
 
-	  if(clause != NULL)
+	  // only work on living clauses
+	  if(clause->width != 0)
 	    {
-	      lits = clause->lits;
-	      clause_is_unit = 0;
-	      clause_is_extinct = 0;
-	      
 	      // place the watched literal at the front of the clause
-	      if(lits[0] != propagator)
+	      lits = clause->lits;
+	      if(lits[0] != get_comp_lit(propagator))
 		{
 		  temp_lit = lits[0];
 		  lits[0] = lits[1];
 		  lits[1] = temp_lit;		  
 		}
-	      
+
 	      DEBUG_MSG(fprintf(stderr, "Dealing with clause: "));
-	 	      
-	      // if the other watched literal is deceased, it must also
-	      // be assigned positively -- so the clause can be deleted
-	      if (lits[1]->dec_level == 0)
-		{
-		  // the clause is extinct
-		  // delete the clause, and decrement active literal counters
-		  data[which_clause] = NULL;
-		  for (which_lit = 0; which_lit < clause->width; which_lit++)
-		    lits[which_lit]->num_active--;
-
-		  DEBUG_MSG(fprintf(stderr, " -> NULL"));
-		  DEBUG_MSG(fprintf(stderr, 
-				    " (other watched literal is deceased)\n"));
-		  break;
-		}
+	      DEBUG_MSG(clause_print(clause));
+	      DEBUG_MSG(fprintf(stderr, " -> "));
 	      
-	      // if the other watched literal is active, it must be satisfied
-	      if (lits[1]->ass_status == ACTIVE)
+	      // the first case to deal with: the other watched literal is POSITIVE
+	      // and its decision level is no larger than propagation dec level
+	      if (lits[1]->truth_value == POSITIVE && lits[1]->dec_level <= dec_level)
 		{
-		  // so the watched literal is preserved
-		  mutable_push(&new_watchers, clause);
-		  
-		  DEBUG_MSG(fprintf(stderr, " -> "));
-		  DEBUG_MSG(clause_print(clause));
-		  DEBUG_MSG(fprintf(stderr, 
-				    " (no change - other watched literal is satisfied)\n"));
-		  break;
-		}
-
-	      // cycle through the candidate literals and attempt a swap
-	      clause_is_unit = 1; // tentative assignment, set to 0 when needed
-	      
-	      for(which_lit = 0; which_lit < clause->width - 2; which_lit++)
-		{
-		  if (lits[which_lit]->ass_status == DECEASED &&
-		      lits[which_lit]->truth_value == POSITIVE)
+		  // if its dec level is 0, delete the clause
+		  if (lits[1]->dec_level == 0)
 		    {
-		      // the clause is extinct
-		      // delete the clause, and decrement active literal counters
-		      clause_is_extinct = 1;
-		      data[which_clause] = NULL;
-		      for (which_lit = 0; which_lit < (clause->width); which_lit++)
+		      for (which_lit = 0; which_lit < clause->width - 1; which_lit++)
 			lits[which_lit]->num_active--;
+		      clause->width = 0;
 		      
-		      DEBUG_MSG(fprintf(stderr, " -> NULL"));
+		      DEBUG_MSG(fprintf(stderr, "clause deleted"));
 		      DEBUG_MSG(fprintf(stderr, 
-					" (a candidate literal is deceased and positive)\n"));
-		      
-		      break;
+					" (other watched literal is dec level 0)\n"));
 		    }
-		  
-		  if (lits[which_lit]->ass_status == PENDING ||
-		      lits[which_lit]->ass_status == AVAILABLE ||
-		      (lits[which_lit]->ass_status == ACTIVE &&
-		       lits[which_lit]->truth_value == POSITIVE))
+		  else
 		    {
-		      // we found an eligible literal
-		      // swap it for the original watched literal
-		      clause_is_unit = 0;
+		      // otherwise, preserve the watched literal
+		      mutable_push(&new_watchers, clause);
+		      
+		      DEBUG_MSG(clause_print(clause));
+		      DEBUG_MSG(fprintf(stderr, 
+					" (no change - other watched literal is satisfied)\n"));
+		    }
+		}
+	      // the other case : try to swap the current watched literal
+	      else 
+		{
+		  // search for a candidate
+		  candidate = 2;
+		  while(candidate < clause->width &&
+			lits[candidate]->truth_value == NEGATIVE &&
+			lits[candidate]->dec_level <= dec_level)
+		      candidate++;		    
+
+		  // if there is no candidate, we have a unit clause
+		  // the unit literal is the other watched literal, lits[1]
+		  if (candidate == clause->width)
+		    {
+		      num_unit_props++; // TODO: increment here or when processed?
+		      DEBUG_MSG(fprintf(stderr, "found unit clause %ld",
+					lit_to_DIMACS(lits[1])));
+		      
+		      // preserve the propagator as watched literal for this clause
+		      mutable_push(&new_watchers, clause);
+		  
+		      if (lits[1]->dec_level <= dec_level)
+			{
+			  if (lits[1]->truth_value == POSITIVE)
+			    {
+			      // the variable is alredy assigned in the correct phase 
+			      
+			      DEBUG_MSG(fprintf(stderr,
+						" -- ignored repeat assignment.\n"));			      
+			    }
+			  else
+			    {
+			      // the propagated assignment yields a conflict
+			      num_conflicts++;
+			      DEBUG_MSG(fprintf(stderr,
+						" -- detected conflict.\n"));
+
+			      // at level 0 the conflict is fatal
+			      if (dec_level == 0)
+				{
+				  CDCL_report_UNSAT();
+				  exit(0);
+				}
+			      
+			      // preserve watched literals on unprocessed clauses
+			      for (which_clause++; which_clause < num_clauses; which_clause++)
+				mutable_push(&new_watchers, data[which_clause]);
+
+			      // reverse last decision
+			      // go backwards through the trail and delete the assignments
+			      trail.tail--;
+			      while((trail.tail >= trail.sequence) &&
+				    ((*trail.tail)->dec_level == dec_level))
+				{
+				  unassign(*trail.tail);
+				  trail.tail--;
+				}
+			      trail.tail++;
+			      trail.head = trail.tail;
+
+			      trail_queue_lit(get_comp_lit(*(trail.head)),
+					      dec_level - 1);	
+
+			      // the solution, since we increment the head later in all 
+			      // cases TODO: is there a better solution?
+			      trail.head--;
+			      DEBUG_MSG(print_model());
+			      DEBUG_MSG(print_trail());
+			      DEBUG_MSG(fprintf(stderr, "head: %p, tail: %p\n",
+					       trail.head, trail.tail));
+			    }
+			}
+		      else
+			{
+			  // queue the unit literal at the current decision level
+			  trail_queue_lit(lits[1], propagator->dec_level);
+			  DEBUG_MSG(fprintf(stderr,
+					    " -- added to trail.\n"));
+			} 
+		    }
+		  else
+		    {
+		      // TODO handle case: candidate is decision level 0 - delete clause
+		      // we found a candidate -- swap it with the watched literal
 		      temp_lit = lits[0];
-		      lits[0] = lits[which_lit];
-		      lits[which_lit] = temp_lit;
+		      lits[0] = lits[candidate];
+		      lits[candidate] = temp_lit;
 		      
 		      // add it to the appropriate list
 		      mutable_push(&(get_comp_lit(lits[0])->watched_lits),
 				   clause);
 		      
-		      DEBUG_MSG(fprintf(stderr, " -> "));
 		      DEBUG_MSG(clause_print(clause));
-		      DEBUG_MSG(fprintf(stderr, "\n"));
-		      
-		      // force inner loop to terminate
-		      break;
+		      DEBUG_MSG(fprintf(stderr, "\n"));		      
 		    }
 		}
-	      
-	      if (clause_is_unit == 1 && clause_is_extinct == 0)
-		{
-		  // we have a unit clause based on the other watched literal
-		  DEBUG_MSG(fprintf(stderr, "found unit clause %ld",
-				    lit_to_DIMACS(lits[1])));
-		  num_unit_props++; // TODO: increment here or when processed?
-		  // the watched literal should be placed on the replacement list
-		  mutable_push(&new_watchers, clause);  
-		  
-		  // check if the negation of the unit literal is on the trail
-		  if ((lits[1])->ass_status == AVAILABLE)
-		    {
-		      trail_queue_lit(lits[1], PROP_ASS);
-		      DEBUG_MSG(fprintf(stderr,
-					" -- added to trail.\n"));
-		    }
-		  else
-		    {
-		      // the status of lits[1] is PENDING
-		      if ((lits[1])->truth_value == NEGATIVE)
-			{
-			  // the implied assignment yields a conflict
-			  DEBUG_MSG(fprintf(stderr,
-					    " -- detected conflict - aborting propagation.\n"));
-			  // add clauses for unprocessed watched literals to replacement
-			  // list
-			  for (which_clause++; which_clause < num_clauses; which_clause++)
-			    mutable_push(&new_watchers, clause);
-			  // free the old data and instate the new list
-			  mutable_free(&(propagator->watched_lits));
-			  propagator->watched_lits = new_watchers;
-			  return CONFLICT;
-			}
-		    }
-		}
-	      
 	    }
 	}
-      // propagation for this assignment has completed without conflict
-      // instate new watched lits      
+
+      // instate new watched literals for the propagator      
       mutable_free(&(propagator->watched_lits));
       propagator->watched_lits = new_watchers;
-      
+
       // increment head
       trail.head++;
+
       DEBUG_MSG(fprintf(stderr,
-			"Completed propagation on literal %ld without conflict\n",
+			"Completed propagation on literal %ld.\n",
 			lit_to_DIMACS(propagator)));
+      DEBUG_MSG(print_watched_lits());
     }
-  
-  // propagation terminates without a conflict
+
+  // propagation terminates
   DEBUG_MSG(fprintf(stderr,"Propagation cycle complete.\n"));
+  DEBUG_MSG(print_model());
+  DEBUG_MSG(print_trail());
   return DECIDE;
 }
 		  
@@ -907,25 +905,29 @@ state_t CDCL_prop()
 char CDCL_decide()
 {
   model_size_t which_var;
+  model_size_t dec_level;
 
   DEBUG_MSG(fprintf(stderr, "In CDCL_decide(). "));
 
   if (trail.head == trail.sequence + num_vars)
-    return SUCCESS;
+    {
+      CDCL_report_SAT();
+      exit(0);
+    }
 
   // find an unassigned var
   for (which_var = 0; which_var < num_vars; which_var++)
     {
-      if(model[which_var].ass_status == AVAILABLE)
+      if(model[which_var].dec_level == DEC_MAX)
 	{
-	  // TODO : delete when bug free
-	  model[which_var].ass_type = DEC_ASS; 
-	  model[which_var + num_vars].ass_type = DEC_ASS;
+	  // find the current decision level
+	  if (trail.head == trail.sequence) dec_level = 1;
+	  else dec_level = (*(trail.head - 1))->dec_level + 1;
 
-	  // put the assignment on the trail (here the assignment is always positive)
-	  trail_queue_lit(model + which_var, DEC_ASS);
-	  // update decision level
-	  dec_level++;
+	  // queue the assignment on the trail (here the assignment is always positive)
+	  trail_queue_lit(model + which_var, dec_level);
+
+	  // record the decision
 	  num_decisions++;
 
 	  DEBUG_MSG(fprintf(stderr, "Made decision %lu.\n",
@@ -943,6 +945,7 @@ char CDCL_decide()
 
 // the simplest clause learning: DPLL-style
 // learn clauses that encode DPLL brandhing
+/*
 void CDCL_repair_conflict()
 {
   clause_t learned_clause;
@@ -981,8 +984,9 @@ void CDCL_repair_conflict()
   // note that backtracking leaves the head pointing to the last decision assignment.
   // backtrack, and add the negation of the last decision (as PROP_ASS) to the trail
   backtrack(dec_level - 1);
-  trail_queue_lit(get_comp_lit(*(trail.head)), CON_ASS);
+  trail_queue_lit(get_comp_lit(*(trail.head)), dec_level - 1);
 }
+*/
 
 void CDCL_print()
 {
