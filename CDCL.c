@@ -47,6 +47,7 @@ typedef struct ass {
   truth_value_t truth_value;
   model_size_t dec_level;
   cnf_size_t num_active;
+  struct ass** trail_pos;
 
   struct mutable {
     mutable_size_t size;
@@ -74,7 +75,7 @@ typedef struct clause clause_t;
 typedef struct trail {
   ass_t** sequence;
   ass_t** head;
-  ass_t** tail;
+  ass_t** tail; 
 } trail_t;
 
 // the trail stores a fixed-sized array of pointers to assignments, storing the
@@ -102,6 +103,7 @@ clock_t start_time;
 unsigned long num_conflicts = 0;
 unsigned long num_decisions = 0;
 unsigned long num_unit_props = 0;
+unsigned long num_pure_props = 0;
 unsigned long num_redefinitions = 0;
 
 // HELPER FUNCTIONS
@@ -128,11 +130,12 @@ void mutable_push(mutable_t* mutable, clause_t* datum);
 //void mutable_print_clauses(mutable_t* mutable); // write when needed
 
 // assignment related
-void assign(ass_t* lit);
+//void assign(ass_t* lit);
 void unassign(ass_t* lit);
 
 // trail related
 void trail_queue_lit(ass_t* lit, model_size_t dec_level);
+void trail_shuffle();
 
 // miscellaneous
 void report_SAT();
@@ -162,8 +165,7 @@ void CDCL_init(char* DIMACS_filename)
   char ch; // used to read single characters from the input file  
   DIMACS_lit_t DIMACS_lit; // temporary literal for reading
   model_size_t width; 
-  model_size_t which_lit; 
-  model_size_t which_ass; 
+  model_size_t which_lit, which_ass, which_var; 
   cnf_size_t which_clause;
   clause_t clause;
   ass_t* lit;
@@ -215,6 +217,14 @@ void CDCL_init(char* DIMACS_filename)
 	error("cannot allocate trail sequence");
   trail.head = trail.sequence;
   trail.tail = trail.sequence;
+  
+  // set initial trail positions
+  for (which_var = 0; which_var < num_vars; which_var++)
+    trail.sequence[which_var] = model + which_var;
+  for (which_var = 0; which_var < num_vars; which_var++)
+    model[which_var].trail_pos = trail.sequence + which_var;
+  for (which_var = 0; which_var < num_vars; which_var++)
+    model[num_vars + which_var].trail_pos = NULL;
 
   // read number of clauses
   if(fscanf(input, "%lu", &cnf.size) != 1)
@@ -344,7 +354,6 @@ void CDCL_prop()
       
       // add the propagating assignment to the model, set all successive additions
       // as propagations
-      //assign(propagator);
       DEBUG_MSG(print_model());
       DEBUG_MSG(print_trail());
       
@@ -388,7 +397,15 @@ void CDCL_prop()
 		  if (lits[1]->dec_level == 0)
 		    {
 		      for (which_lit = 0; which_lit < clause->width - 1; which_lit++)
-			lits[which_lit]->num_active--;
+			{			 
+			  if(--(lits[which_lit]->num_active) == 1)
+			    {
+			      // TODO: propagate as pure literal
+			      trail_queue_lit(lits[which_lit], dec_level);
+			      num_pure_props++;
+			    }
+			}
+		      
 		      clause->width = 0;
 		      
 		      DEBUG_MSG(fprintf(stderr, "clause deleted"));
@@ -426,64 +443,53 @@ void CDCL_prop()
 		      // preserve the propagator as watched literal for this clause
 		      mutable_push(&new_watchers, clause);
 		  
-		      if (lits[1]->dec_level <= dec_level)
+		      if (get_comp_lit(lits[1])->trail_pos != NULL && get_comp_lit(lits[1])->trail_pos < trail.tail) 
 			{
-			  if (lits[1]->truth_value == POSITIVE)
+			  // the propagated assignment yields a conflict
+			  num_conflicts++;
+			  DEBUG_MSG(fprintf(stderr,
+					    " -- detected conflict.\n"));
+			  
+			  // at level 0 the conflict is fatal
+			  if (dec_level == 0)
 			    {
-			      // the variable is alredy assigned in the correct phase 
-			      
-			      DEBUG_MSG(fprintf(stderr,
-						" -- ignored repeat assignment.\n"));			      
+			      report_UNSAT();
+			      exit(0);
 			    }
-			  else
-			    {
-			      // the propagated assignment yields a conflict
-			      num_conflicts++;
-			      DEBUG_MSG(fprintf(stderr,
-						" -- detected conflict.\n"));
-
-			      // at level 0 the conflict is fatal
-			      if (dec_level == 0)
-				{
-				  report_UNSAT();
-				  exit(0);
-				}
-			      
-			      // preserve watched literals on unprocessed clauses
-			      for (which_clause++; which_clause < num_clauses; which_clause++)
-				mutable_push(&new_watchers, data[which_clause]);
-
-			      // reverse last decision
-			      // go backwards through the trail and delete the assignments
+			  
+			  // preserve watched literals on unprocessed clauses
+			  for (which_clause++; which_clause < num_clauses; which_clause++)
+			    mutable_push(&new_watchers, data[which_clause]);
+			  
+			  // reverse last decision
+			  // go backwards through the trail and delete the assignments
+			  trail.tail--;
+			  while((trail.tail >= trail.sequence) &&
+				((*trail.tail)->dec_level == dec_level))
 			      trail.tail--;
-			      while((trail.tail >= trail.sequence) &&
-				    ((*trail.tail)->dec_level == dec_level))
-				{
-				  unassign(*trail.tail);
-				  trail.tail--;
-				}
-			      trail.tail++;
-			      trail.head = trail.tail;
-
-			      trail_queue_lit(get_comp_lit(*(trail.head)),
+			  trail.tail++;
+			  trail.head = trail.tail;
+			  
+			  trail_queue_lit(get_comp_lit(*(trail.head)),
 					      dec_level - 1);	
 
-			      // the solution, since we increment the head later in all 
-			      // cases TODO: is there a better solution?
-			      trail.head--;
-			      DEBUG_MSG(print_model());
-			      DEBUG_MSG(print_trail());
-			      DEBUG_MSG(fprintf(stderr, "head: %p, tail: %p\n",
-					       trail.head, trail.tail));
-			    }
+			  // the solution, since we increment the head later in all 
+			  // cases TODO: is there a better solution?
+			  trail.head--;
+			  DEBUG_MSG(print_model());
+			  DEBUG_MSG(print_trail());
+			}
+		      else if (lits[1]->trail_pos != NULL && lits[1]->trail_pos < trail.tail) 
+			{
+			  DEBUG_MSG(fprintf(stderr, " (ignoring repeated unit clause)\n"));
 			}
 		      else
 			{
 			  // queue the unit literal at the current decision level
-			  trail_queue_lit(lits[1], propagator->dec_level);
+			  trail_queue_lit(lits[1], dec_level);
 			  DEBUG_MSG(fprintf(stderr,
 					    " -- added to trail.\n"));
-			} 
+			}
 		    }
 		  else
 		    {
@@ -514,7 +520,7 @@ void CDCL_prop()
       DEBUG_MSG(fprintf(stderr,
 			"Completed propagation on literal %ld.\n",
 			lit_to_DIMACS(propagator)));
-      DEBUG_MSG(print_watched_lits());
+      //DEBUG_MSG(print_watched_lits());
     }
 
   // propagation terminates
@@ -542,7 +548,21 @@ void CDCL_decide()
       report_SAT();
       exit(0);
     }
+  if (trail.head == trail.sequence)
+    {
+      trail_queue_lit(*trail.head, 1);
+    }
+  else
+    {
+      trail_queue_lit(*trail.head, (*(trail.head - 1))->dec_level + 1);
+    }
 
+  DEBUG_MSG(fprintf(stderr, "Made decision %lu.\n",
+		    lit_to_DIMACS(*trail.head)));
+  DEBUG_MSG(print_model());
+  DEBUG_MSG(print_trail());
+  
+  /*
   // find an unassigned var
   for (which_var = 0; which_var < num_vars; which_var++)
     {
@@ -558,15 +578,12 @@ void CDCL_decide()
 	  // record the decision
 	  num_decisions++;
 
-	  DEBUG_MSG(fprintf(stderr, "Made decision %lu.\n",
-			    lit_to_DIMACS(model + which_var)));
-	  DEBUG_MSG(print_model());
-	  DEBUG_MSG(print_trail());
 	  
 	  return;
 	}	
     }
-  DEBUG_MSG(fprintf(stderr, "No decision possible.\n"));
+  */
+
   return;
 }
 
@@ -696,6 +713,7 @@ void mutable_push(mutable_t* mutable, clause_t* datum)
 
 // assignment related
 
+/*
 void assign(ass_t* lit)
 {
   // TODO: pass the decision level also to this function
@@ -705,6 +723,7 @@ void assign(ass_t* lit)
   lit->truth_value = POSITIVE;
   comp_lit->truth_value = NEGATIVE;
 }
+*/
 
 void unassign(ass_t* lit)
 {
@@ -719,12 +738,16 @@ void trail_queue_lit(ass_t* lit, model_size_t dec_level)
 {
   ass_t* comp_lit = get_comp_lit(lit);
 
-  // queue assignment at current decision level
+  // place the assignment at the tail in the vacant position at lit->trail_pos
+  (*trail.tail)->trail_pos = lit->trail_pos;
+  
+  // queue assignment at given decision level
   lit->dec_level = dec_level;
   lit->truth_value = POSITIVE;
+  lit->trail_pos = trail.tail;
   comp_lit->dec_level = dec_level;
   comp_lit->truth_value = NEGATIVE;
-
+  
   // place assignment at tail of trail
   *(trail.tail) = lit;
   trail.tail++;
@@ -812,21 +835,20 @@ void print_ass(ass_t* ass)
 void print_trail()
 {
   ass_t** temp_pointer;
+  model_size_t which_var, dec_level;
 
-  fprintf(stderr, "TRAIL: ");
+  fprintf(stderr, "TRAIL:\n");
 
-  if (trail.sequence == trail.tail) 
+  for(which_var = 0, temp_pointer = trail.sequence; which_var < num_vars; which_var++, temp_pointer++)
     {
-      fprintf(stderr, " (empty)\n\n");
-      return;
-    }
-  fprintf(stderr, "\n");
-  for(temp_pointer = trail.sequence; temp_pointer < trail.tail; temp_pointer++)
-    {
-      fprintf(stderr, "%lu: %ld / %lu",
-	      temp_pointer - trail.sequence + 1,
-	      lit_to_DIMACS(*temp_pointer),
-	      (*temp_pointer)->dec_level);
+      fprintf(stderr, "%lu: %ld / ",
+	      which_var + 1,
+	      lit_to_DIMACS(*(temp_pointer)));
+
+      if ((*temp_pointer)->dec_level == DEC_MAX)
+	fprintf(stderr, "M");
+      else
+	fprintf(stderr, "%lu", (*temp_pointer)->dec_level);
       if (temp_pointer == trail.head) fprintf(stderr, " HEAD");
       if (temp_pointer == trail.tail) fprintf(stderr, " TAIL");
       fprintf(stderr, "\n");
