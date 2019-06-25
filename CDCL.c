@@ -49,7 +49,8 @@ struct dec {
   dec_id_t id;
   struct dec* next;
   struct ass {
-    struct decision* head;
+    struct dec* head;
+    struct ass* prev;
     struct ass* next;
     struct var {
       struct ass* trail_pos;
@@ -63,10 +64,10 @@ struct dec {
 	    struct var* var;
 	    phase_t phase;	    
 	  } *lits;
-	} **data;    
-      } *pos_all, *neg_all, *pos_watched, *neg_watched;
+	} **clauses;    
+      } pos_all, neg_all, pos_watched, neg_watched;
     } *var;
-    truth_value_t truth_value;
+    phase_t phase;
   } *first, *last;
 };
 
@@ -83,12 +84,11 @@ typedef struct lit lit_t;
 // its negation appears.
 
 typedef struct trail {
-  decision_t* pool;
-  decision_t* implied;
-  decision_t* head;
-  decision_t* current;
-  decision_t* conflict;
-
+  dec_t* pool;
+  dec_t* implied;
+  dec_t* head;
+  dec_t* current;
+  dec_t* conflict;
   ass_t* cursor;
 } trail_t;
 
@@ -105,7 +105,7 @@ typedef struct cnf {
 // GLOBAL DECLARATIONS
 
 // the solver
-model_size_t num_vars;
+varset_size_t num_vars;
 cnf_t cnf;
 var_t* model;
 trail_t trail;
@@ -118,16 +118,24 @@ unsigned long num_unit_props = 0;
 unsigned long num_pure_props = 0;
 unsigned long num_redefinitions = 0;
 
-void dec_add_ass(dec* dec, ass* ass)
+void dec_add_ass(dec_t* dec, ass_t* ass)
 {
   ass->head = dec;
   ass->next = dec->first;
   dec->first = ass;
-  if (dec->last == NULL)
-    dec->last = ass;
 }
 
-/*
+void queue(dec_t* dec, var_t* var, phase_t phase)
+{
+  ass_t* temp_ass = var->trail_pos;
+  temp_ass->prev->next = temp_ass->next;
+  temp_ass->next->prev = temp_ass->prev;
+  temp_ass->phase = phase;
+  dec->last->next = temp_ass;
+  temp_ass->prev = dec->last;
+  temp_ass->next = NULL;
+  dec->last = temp_ass;
+}
 
 // HELPER FUNCTIONS
 
@@ -135,37 +143,37 @@ void error(char* message);
 
 // literal-related
 
-ass_t* DIMACS_to_lit(DIMACS_lit_t value);
-DIMACS_lit_t lit_to_DIMACS(ass_t* lit);
-ass_t* get_comp_lit(ass_t* lit);
+var_t* DIMACS_to_var(DIMACS_lit_t DIMACS_lit);
+phase_t DIMACS_to_phase(DIMACS_lit_t DIMACS_lit);
+DIMACS_lit_t lit_to_DIMACS(lit_t* lit);
+DIMACS_lit_t ass_to_DIMACS(ass_t* lit);
 
 // clause-related
-clause_t clause_init(model_size_t width);
+clause_t clause_init(varset_size_t width);
 void clause_free(clause_t* clause);
 
-// mutable related
+// list related
 // this is an automatically resized array of pointers to clauses.
 // the array becomes twice as large whenever necessary to add an item
-void mutable_init(mutable_t* mutable);
-void mutable_free(mutable_t* mutable);
-void mutable_free_clauses(mutable_t* mutable);
-void mutable_push(mutable_t* mutable, clause_t* datum);
-//void mutable_print_clauses(mutable_t* mutable); // write when needed
+void list_init(list_t* list);
+void list_free(list_t* list);
+void list_push(list_t* list, clause_t* datum);
+void list_print_clauses(list_t* list); // write when needed
 
 // assignment related
 //void assign(ass_t* lit);
-void unassign(ass_t* lit);
+//void unassign(ass_t* lit);
 
 // trail related
-void trail_queue_lit(ass_t* lit, model_size_t dec_level);
-void trail_shuffle();
+//void trail_queue_lit(ass_t* lit, model_size_t dec_level);
+//void trail_shuffle();
 
 // miscellaneous
 void report_SAT();
 void report_UNSAT();
 
 // printing and debugging
-void print_lit(ass_t** lit);
+void print_lit(lit_t* lit);
 void print_clause(clause_t* clause);
 void print_cnf();
 void print_ass(ass_t* ass);
@@ -175,8 +183,6 @@ void print_trail();
 void print_stats();
 
 // CDCL INTERFACE IMPLEMENTATION
-
-*/
 
 void CDCL_init(char* DIMACS_filename)
 {
@@ -189,11 +195,12 @@ void CDCL_init(char* DIMACS_filename)
   char buffer[5]; // used only to read the `cnf' string from the input file
   char ch; // used to read single characters from the input file  
   DIMACS_lit_t DIMACS_lit; // temporary literal for reading
-  model_size_t width; 
-  model_size_t which_lit, which_ass, which_var; 
+  varset_size_t width, which_lit, which_var; 
   cnf_size_t which_clause;
-  clause_t clause;
-  ass_t* lit;
+  clause_t* clause;
+  lit_t* lit;
+  ass_t* ass;
+  var_t* var;
 
   start_time = clock();
 
@@ -204,7 +211,7 @@ void CDCL_init(char* DIMACS_filename)
   if ((input = (FILE *)fopen(DIMACS_filename, "r")) == NULL) error("cannot open file");
   if ((cursor = (FILE *)fopen(DIMACS_filename, "r")) == NULL) error("cannot open file");
 
-  // parse header
+  // PARSE HEADER
   // disregard comment lines
   while ((ch = fgetc(input)) == 'c')
     while ((ch = fgetc(input)) != '\n')
@@ -225,43 +232,35 @@ void CDCL_init(char* DIMACS_filename)
   if (num_vars > MAX_VARS) // i.e. more variables than our data type can handle
     error("too many vars - maximum MAX_VARS");
  
-  // initialise model and trail
-  if ((trail.pool = (dec_t*)malloc(sizeof(dec_t))) == NULL)
-    error("cannot allocate dec_t pool");
-
-  
-
+  // INITIALISE SOLVER STRUCTURES
   if ((model = (var_t*)malloc(sizeof(var_t) * num_vars)) == NULL)
 	error("cannot allocate model");
 
-  
+  // initialise pool group and default assignments
+  // initially the pool contains all variables
+  if ((trail.pool = (dec_t*)malloc(sizeof(dec_t))) == NULL)
+    error("cannot allocate dec_t pool");
+
   for (which_var = 0; which_var < num_vars; which_var++)
     {
-      // set default values and initialise watched literals mutable for each assignment
-      model[which_ass].dec_level = DEC_MAX; 
-      model[which_ass].num_active = 0;
-      mutable_init(&(model[which_ass].watched_lits));
+      ass = (ass_t*)malloc(sizeof(ass_t));
+      ass->var = model + which_var;
+      ass->phase = POSITIVE;
+      dec_add_ass(trail.pool, ass);
+      model[which_var].trail_pos = ass;
     }
-
-  // initialise trail
-  if ((trail.sequence = (ass_t**)malloc(sizeof(ass_t*) * num_asses)) == NULL)
-	error("cannot allocate trail sequence");
-  trail.head = trail.sequence;
-  trail.tail = trail.sequence;
   
-  // set initial trail positions
-  for (which_var = 0; which_var < num_vars; which_var++)
-    trail.sequence[which_var] = model + which_var;
-  for (which_var = 0; which_var < num_vars; which_var++)
-    model[which_var].trail_pos = trail.sequence + which_var;
-  for (which_var = 0; which_var < num_vars; which_var++)
-    model[num_vars + which_var].trail_pos = NULL;
+  // initialise implied literal group
+  if ((trail.implied = (dec_t*)malloc(sizeof(dec_t))) == NULL)
+    error("cannot allocate dec_t pool");
 
+  // READ CNF
   // read number of clauses
   if(fscanf(input, "%lu", &cnf.size) != 1)
     error("bad input - number of clauses not found");
   fscanf(cursor, "%lu", &cnf.size);
 
+  // deal with trivial formulas
   if (cnf.size == 0)
     {
       report_SAT();
@@ -285,51 +284,49 @@ void CDCL_init(char* DIMACS_filename)
       for(width = 0; DIMACS_lit != 0; width++) 
 	fscanf(cursor, "%ld", &DIMACS_lit);
 
-      // if the width is 0, note that the formula is UNSAT and return
+      // if the width is 0, formula is UNSAT
       if (width == 0)
 	{
 	  report_UNSAT();
 	  exit(0);
 	}
 
-      // if the width is 1, add the assignment as a level 0 unit propagation
+      // if the width is 1, add the assignment as an implied unit propagation
       if (width == 1)
 	{
 	  fscanf(input, "%ld", &DIMACS_lit);
-	  trail_queue_lit(DIMACS_to_lit(DIMACS_lit), 0);
+	  queue(trail.implied, DIMACS_to_var(DIMACS_lit), DIMACS_to_phase(DIMACS_lit));
 	  fscanf(input, "%ld", &DIMACS_lit);
 	  // we do not store unit clauses, so decrement counters
+	  // TODO: cnf.size is probably inessential
+	  // TODO: better error handling for CDCL_init();
 	  cnf.size--;
 	  which_clause--;
 	}
       else 
 	{
 	  // initialise clause
-	  clause = clause_init(width);
-	  // set literals with input
-	  which_lit = 0;
+	  cnf.clauses[which_clause] = clause_init(width);
+	  clause = cnf.clauses + which_clause;
+	  // set literals 
 	  fscanf(input, "%ld", &DIMACS_lit);
-	  while(DIMACS_lit != 0) 
-	    {
-	      clause.lits[which_lit] = (lit = DIMACS_to_lit(DIMACS_lit));
-	      lit->num_active++;
+	  for(which_lit = 0; which_lit < width; which_lit++) 
+	    {	      
+	      clause->lits[which_lit].var = (var = DIMACS_to_var(DIMACS_lit));
+	      if ((clause->lits[which_lit].phase = DIMACS_to_phase(DIMACS_lit)) == POSITIVE)
+		list_push(&(var->pos_all), clause);
+	      else list_push(&(var->neg_all), clause);
 	      fscanf(input, "%ld", &DIMACS_lit);
-	      which_lit++;
 	    }
-	  
-	  // put the clause into the cnf
-	  cnf.clauses[which_clause] = clause;
-	  
        	  // watch the first two literals
-	  mutable_push(&(get_comp_lit(clause.lits[0])->watched_lits),
-		       cnf.clauses + which_clause);
-	  mutable_push(&(get_comp_lit(clause.lits[1])->watched_lits),
-		       cnf.clauses + which_clause);
+	  if ((lit = clause->lits)->phase == POSITIVE)
+	    list_push(&((lit->var)->pos_watched),clause);
+	  else list_push(&((lit->var)->neg_watched), clause);
+	  if ((lit = clause->lits + 1)->phase == POSITIVE)
+	    list_push(&((lit->var)->pos_watched),clause);
+	  else list_push(&((lit->var)->neg_watched), clause);
 	}
     }
-  
-  // initialise empty learned clause list
-  mutable_init(&(learned_cnf));
 }
 
 /*
@@ -627,11 +624,6 @@ void CDCL_print()
 // HELPER FUNCTION IMPLEMENTATION
 
 //  error function implementation
-void error(char* message)
-{
-  fprintf(stderr, "FATAL ERROR: %s.\n", message);
-  exit(1);
-}
 
 // literal related
 
@@ -775,22 +767,6 @@ void trail_queue_lit(ass_t* lit, model_size_t dec_level)
   trail.tail++;
 }
 
-// miscellaneous
-
-void report_SAT()
-{
-  print_model();
-  fprintf(stderr, "v SAT\n");
-  print_stats();
-  exit(0);
-}
-void report_UNSAT()
-{
-  fprintf(stderr, "v UNSAT\n");
-  print_stats();
-  exit(0);
-}
-
 // printing and debugging
 
 void print_lit(ass_t** lit)
@@ -831,6 +807,14 @@ void print_watched_lits()
   fprintf(stderr, "\n");
 }
 
+
+// prints the value of an assignment and its decision level
+void print_ass(ass_t* ass)
+{
+  if(ass->dec_level != DEC_MAX)
+      fprintf(stderr, "%d / %lu ", ass->truth_value, ass->dec_level);
+}
+
 void print_model()
 {
   model_size_t which_var;
@@ -847,12 +831,6 @@ void print_model()
   fprintf(stderr, "\n");
 }
 
-// prints the value of an assignment and its decision level
-void print_ass(ass_t* ass)
-{
-  if(ass->dec_level != DEC_MAX)
-      fprintf(stderr, "%d / %lu ", ass->truth_value, ass->dec_level);
-}
 
 void print_trail()
 {
@@ -878,6 +856,143 @@ void print_trail()
   fprintf(stderr, "\n");
 }
 
+
+*/
+
+// DIMACS related
+
+var_t* DIMACS_to_var(DIMACS_lit_t DIMACS_lit)
+{
+  return  model + ((DIMACS_lit < 0 ? -1 : 1) * DIMACS_lit) - 1;
+}
+
+phase_t DIMACS_to_phase(DIMACS_lit_t DIMACS_lit)
+{
+  return  (DIMACS_lit < 0 ? NEGATIVE : POSITIVE);
+}
+
+DIMACS_lit_t lit_to_DIMACS(lit_t* lit)
+{
+  return (DIMACS_lit_t)((lit->var - model) + 1) * (lit->phase == POSITIVE ? 1 : -1);
+}
+
+DIMACS_lit_t ass_to_DIMACS(ass_t* ass)
+{
+  return (DIMACS_lit_t)((ass->var - model) + 1) * (ass->phase == POSITIVE ? 1 : -1);
+}
+
+// clause related
+
+clause_t clause_init(varset_size_t width)
+{
+  // initialises a clause of size `width'
+  clause_t clause;
+
+  clause.width = width;
+  if ((clause.lits = (lit_t*)malloc(sizeof(lit_t) * (width))) == NULL)
+    error("cannot allocate clause literals");
+
+  return clause;
+}
+
+void clause_free(clause_t* clause)
+{
+  free(clause->lits);
+}
+
+// list related
+
+void list_init(list_t* list)
+{
+  // allocate memory for data - default size is 1
+  if ((list->clauses = (clause_t**)malloc(sizeof(clause_t*))) == NULL)
+    error("cannot allocate list data");
+
+  // set default member values
+  list->size = 1L;
+  list->used = 0L;
+  list->at = 0L;
+}
+
+// use this to free a watched literal list
+void list_free(list_t* list)
+{
+  // frees only the data of the pointed to list
+  free(list->clauses);
+}
+
+void list_push(list_t* list, clause_t* clause)
+{
+  // pushes the datum onto the list's data array
+  list_size_t size;
+
+  if (list->used == (size = list->size))
+    {
+      if ((list->clauses = 
+	   (clause_t**)realloc(list->clauses, 2 * size * sizeof(clause_t*))) == NULL)
+	error("cannot reallocate list data");
+      list->size = 2 * size;
+      list->clauses[list->used++] = clause;
+    }
+  else
+    {
+      list->clauses[list->used++] = clause;      
+    }
+}
+
+// miscellaneous
+
+void error(char* message)
+{
+  fprintf(stderr, "FATAL ERROR: %s.\n", message);
+  exit(1);
+}
+
+void report_SAT()
+{
+  //print_model();
+  fprintf(stderr, "v SAT\n");
+  print_stats();
+  exit(0);
+}
+void report_UNSAT()
+{
+  fprintf(stderr, "v UNSAT\n");
+  print_stats();
+  exit(0);
+}
+
+// printing and debugging
+
+void print_lit(lit_t* lit)
+{
+  // prints an internal literal in the form of a DIMACS literal
+  fprintf(stderr, "%ld", lit_to_DIMACS(lit));
+}
+
+void print_clause(clause_t* clause)
+{
+  varset_size_t which_lit, num_lits = clause->width;
+
+  for(which_lit = 0; which_lit < num_lits; which_lit++)
+    {
+      print_lit(clause->lits + which_lit);
+      fprintf(stderr, " ");
+    }
+}
+
+void print_list(list_t *list)
+{
+  cnf_size_t which_clause, num_clauses = list->used;
+  clause_t** clauses = list->clauses;
+
+  for (which_clause = 0; which_clause < num_clauses; which_clause++)
+    {
+	  print_clause(clauses[which_clause]);
+	  fprintf(stderr, "\n");
+    }
+}
+
 void  print_stats()
 {
   fprintf(stderr, "Conflicts:         %lu\n", num_conflicts);
@@ -888,5 +1003,3 @@ void  print_stats()
   fprintf(stderr, "%1.1zdMb ", getPeakRSS() / 1048576);
   fprintf(stderr, "\n");
 }
-
-*/
