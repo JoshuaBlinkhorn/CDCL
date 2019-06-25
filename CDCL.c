@@ -26,7 +26,7 @@
 
 // MACROS
 
-// truth values
+// truth values / phases
 #define POSITIVE 1
 #define NEGATIVE 0
 
@@ -36,36 +36,46 @@
 
 // native type aliases
 typedef signed char truth_value_t;
+typedef signed char phase_t;
 typedef signed long int DIMACS_lit_t;
 typedef unsigned long int cnf_size_t;
-typedef unsigned long int model_size_t; 
-typedef unsigned long int mutable_size_t;
+typedef unsigned long int varset_size_t; 
+typedef unsigned long int list_size_t;
+typedef unsigned long int dec_id_t;
 
 // MAIN STRUCTURE OF DATA 
 
-typedef struct ass {
-  truth_value_t truth_value;
-  model_size_t dec_level;
-  cnf_size_t num_active;
-  struct ass** trail_pos;
+struct dec {
+  dec_id_t id;
+  struct dec* next;
+  struct ass {
+    struct decision* head;
+    struct ass* next;
+    struct var {
+      struct ass* trail_pos;
+      struct list {
+	list_size_t size;
+	list_size_t used;
+	list_size_t at;
+	struct clause {
+	  varset_size_t width;
+	  struct lit {
+	    struct var* var;
+	    phase_t phase;	    
+	  } *lits;
+	} **data;    
+      } *pos_all, *neg_all, *pos_watched, *neg_watched;
+    } *var;
+    truth_value_t truth_value;
+  } *first, *last;
+};
 
-  struct mutable {
-    mutable_size_t size;
-    mutable_size_t used;
-
-    struct clause {
-      struct ass** lits;
-      model_size_t width;
-    };
-    
-    struct clause** data;
-  };
-
-  struct mutable watched_lits;
-} ass_t;
-
-typedef struct mutable mutable_t;
+typedef struct dec dec_t;
+typedef struct ass ass_t;
+typedef struct var var_t;
+typedef struct list list_t;
 typedef struct clause clause_t;
+typedef struct lit lit_t;
 
 // assignments are the main objects, which are treated implicitly in one-to-one 
 // correspondence with literals. A clause is a fixed size list of pointers to
@@ -73,9 +83,13 @@ typedef struct clause clause_t;
 // its negation appears.
 
 typedef struct trail {
-  ass_t** sequence;
-  ass_t** head;
-  ass_t** tail; 
+  decision_t* pool;
+  decision_t* implied;
+  decision_t* head;
+  decision_t* current;
+  decision_t* conflict;
+
+  ass_t* cursor;
 } trail_t;
 
 // the trail stores a fixed-sized array of pointers to assignments, storing the
@@ -92,10 +106,8 @@ typedef struct cnf {
 
 // the solver
 model_size_t num_vars;
-model_size_t num_asses; // always num_vars * 2
 cnf_t cnf;
-mutable_t learned_cnf;
-ass_t* model;
+var_t* model;
 trail_t trail;
 
 // stats
@@ -105,6 +117,17 @@ unsigned long num_decisions = 0;
 unsigned long num_unit_props = 0;
 unsigned long num_pure_props = 0;
 unsigned long num_redefinitions = 0;
+
+void dec_add_ass(dec* dec, ass* ass)
+{
+  ass->head = dec;
+  ass->next = dec->first;
+  dec->first = ass;
+  if (dec->last == NULL)
+    dec->last = ass;
+}
+
+/*
 
 // HELPER FUNCTIONS
 
@@ -153,6 +176,8 @@ void print_stats();
 
 // CDCL INTERFACE IMPLEMENTATION
 
+*/
+
 void CDCL_init(char* DIMACS_filename)
 {
   
@@ -198,13 +223,19 @@ void CDCL_init(char* DIMACS_filename)
   fscanf(cursor, "%lu", &(num_vars));
 
   if (num_vars > MAX_VARS) // i.e. more variables than our data type can handle
-    error("too many vars");
-  num_asses = num_vars * 2;
+    error("too many vars - maximum MAX_VARS");
+ 
+  // initialise model and trail
+  if ((trail.pool = (dec_t*)malloc(sizeof(dec_t))) == NULL)
+    error("cannot allocate dec_t pool");
 
-  // initialise model
-  if ((model = (ass_t*)malloc(sizeof(ass_t) * num_asses)) == NULL)
+  
+
+  if ((model = (var_t*)malloc(sizeof(var_t) * num_vars)) == NULL)
 	error("cannot allocate model");
-  for (which_ass = 0; which_ass < num_asses; which_ass++)
+
+  
+  for (which_var = 0; which_var < num_vars; which_var++)
     {
       // set default values and initialise watched literals mutable for each assignment
       model[which_ass].dec_level = DEC_MAX; 
@@ -300,6 +331,8 @@ void CDCL_init(char* DIMACS_filename)
   // initialise empty learned clause list
   mutable_init(&(learned_cnf));
 }
+
+/*
 
 void CDCL_free()
 {
@@ -562,30 +595,26 @@ void CDCL_decide()
   DEBUG_MSG(print_model());
   DEBUG_MSG(print_trail());
   
-  /*
   // find an unassigned var
-  for (which_var = 0; which_var < num_vars; which_var++)
-    {
-      if(model[which_var].dec_level == DEC_MAX)
-	{
-	  // find the current decision level
-	  if (trail.head == trail.sequence) dec_level = 1;
-	  else dec_level = (*(trail.head - 1))->dec_level + 1;
-
-	  // queue the assignment on the trail (here the assignment is always positive)
-	  trail_queue_lit(model + which_var, dec_level);
-
-	  // record the decision
-	  num_decisions++;
-
-	  
-	  return;
-	}	
-    }
-  */
-
-  return;
-}
+  //for (which_var = 0; which_var < num_vars; which_var++)
+  //  {
+  //   if(model[which_var].dec_level == DEC_MAX)
+  //	{
+  //  // find the current decision level
+  //	  if (trail.head == trail.sequence) dec_level = 1;
+  //	  else dec_level = (*(trail.head - 1))->dec_level + 1;
+  //
+  //	  // queue the assignment on the trail (here the assignment is always positive)
+  //	  trail_queue_lit(model + which_var, dec_level);
+  //
+  //	  // record the decision
+  //	  num_decisions++;	  
+  //	  return;
+  //	}	
+  //    }
+  //
+  //  return;
+  //}
 
 void CDCL_print()
 {
@@ -711,20 +740,6 @@ void mutable_push(mutable_t* mutable, clause_t* datum)
     }
 }
 
-// assignment related
-
-/*
-void assign(ass_t* lit)
-{
-  // TODO: pass the decision level also to this function
-  // overwrites the assignment satisfying the literal into the model
-  ass_t* comp_lit = get_comp_lit(lit);
-
-  lit->truth_value = POSITIVE;
-  comp_lit->truth_value = NEGATIVE;
-}
-*/
-
 void unassign(ass_t* lit)
 {
   // unassigns the variable for this literal (i.e. for the literal and its complement)
@@ -736,15 +751,22 @@ void unassign(ass_t* lit)
 
 void trail_queue_lit(ass_t* lit, model_size_t dec_level)
 {
+  // make some temp copies
   ass_t* comp_lit = get_comp_lit(lit);
+  ass_t** temp_trail_pos = lit->trail_pos;
+  ass_t* temp_lit = *trail.tail;
 
-  // place the assignment at the tail in the vacant position at lit->trail_pos
-  (*trail.tail)->trail_pos = lit->trail_pos;
-  
+  // place the queued literal at the tail
+  *(trail.tail) = lit;
+  lit->trail_pos = trail.tail;
+
+  // move the literal that was at tail 
+  if ((temp_lit->trail_pos = temp_trail_pos) != NULL)
+    *(temp_trail_pos) = temp_lit
+    
   // queue assignment at given decision level
   lit->dec_level = dec_level;
   lit->truth_value = POSITIVE;
-  lit->trail_pos = trail.tail;
   comp_lit->dec_level = dec_level;
   comp_lit->truth_value = NEGATIVE;
   
@@ -867,3 +889,4 @@ void  print_stats()
   fprintf(stderr, "\n");
 }
 
+*/
