@@ -18,11 +18,21 @@
 #include <time.h>
 #include "getRSS.c"
 
+// enable debugging
 #ifdef DEBUG
 #define DEBUG_MSG(x) (x)
 #else
 #define DEBUG_MSG(x) 
 #endif
+
+// TODO: debug this macro 
+/*
+#ifndef COMP
+#define CHECK(x) (x)
+#else
+#define CHECK(x) 
+#endif
+*/
 
 // MACROS
 
@@ -121,25 +131,6 @@ unsigned long num_unit_props = 0;
 unsigned long num_pure_props = 0;
 unsigned long num_redefinitions = 0;
 
-void dec_add_ass(group_t* dec, ass_t* ass)
-{
-  ass->head = dec;
-  ass->next = dec->first;
-  dec->first = ass;
-}
-
-void queue(group_t* dec, var_t* var, phase_t phase)
-{
-  ass_t* temp_ass = var->trail_pos;
-  temp_ass->prev->next = temp_ass->next;
-  temp_ass->next->prev = temp_ass->prev;
-  temp_ass->phase = phase;
-  dec->last->next = temp_ass;
-  temp_ass->prev = dec->last;
-  temp_ass->next = NULL;
-  dec->last = temp_ass;
-}
-
 // HELPER FUNCTIONS
 
 void error(char* message);
@@ -164,8 +155,10 @@ void list_push(list_t* list, clause_t* datum);
 void list_print_clauses(list_t* list); // write when needed
 
 // group related
-void group_init(group_t* group, group_id_t id);
+group_t* group_init(group_id_t id);
 void group_free(group_t* group);
+void pool_add_ass(ass_t* ass);
+int queue(group_t* group, var_t* var, phase_t phase);
 
 // assignment related
 //void assign(ass_t* lit);
@@ -238,7 +231,7 @@ void CDCL_init(char* DIMACS_filename)
 
   if (num_vars > MAX_VARS) // i.e. more variables than our data type can handle
     error("too many vars - maximum MAX_VARS");
- 
+
   // INITIALISE SOLVER STRUCTURES
   // varset
   if ((varset = (var_t*)malloc(sizeof(var_t) * num_vars)) == NULL)
@@ -248,15 +241,16 @@ void CDCL_init(char* DIMACS_filename)
 
   // initialise pool group and default assignments
   // initially the pool contains all variables
-  group_init(trail.pool, POOL);
+  trail.pool = group_init(POOL);
 
+  // initialise default assignments TODO: there is a better way to do this
   for (which_var = 0; which_var < num_vars; which_var++)
     {
-      // initialise default assignment
-      ass = (ass_t*)malloc(sizeof(ass_t));
+      if ((ass = (ass_t*)malloc(sizeof(ass_t))) == NULL)
+	error("cannot allocate assignment");      
       ass->var = varset + which_var;
       ass->phase = POSITIVE;
-      dec_add_ass(trail.pool, ass);
+      pool_add_ass(ass);
       varset[which_var].trail_pos = ass;
       // initialise lists
       list_init(&(varset[which_var].pos_watched));
@@ -266,7 +260,8 @@ void CDCL_init(char* DIMACS_filename)
     }
 
   // initialise model group
-  group_init(trail.model, MODEL);
+  trail.model = group_init(MODEL);
+  trail.root = trail.model;
 
   // READ CNF
   // read number of clauses
@@ -296,7 +291,12 @@ void CDCL_init(char* DIMACS_filename)
       // find width of clause with cursor
       fscanf(cursor, "%ld", &DIMACS_lit);
       for(width = 0; DIMACS_lit != 0; width++) 
-	fscanf(cursor, "%ld", &DIMACS_lit);
+	{
+	  // TODO: enclose in check macro
+	  if((((DIMACS_lit < 0 ? -1 : 1) * DIMACS_lit) - 1) >= num_vars)
+	    error("bad input - literal magnitude larger than num vars");
+	  fscanf(cursor, "%ld", &DIMACS_lit);
+	}
 
       // if the width is 0, formula is UNSAT
       if (width == 0)
@@ -308,6 +308,7 @@ void CDCL_init(char* DIMACS_filename)
       // if the width is 1, add the assignment as an implied unit propagation
       if (width == 1)
 	{
+	  num_unit_props++;
 	  fscanf(input, "%ld", &DIMACS_lit);
 	  queue(trail.model, DIMACS_to_var(DIMACS_lit), DIMACS_to_phase(DIMACS_lit));
 	  fscanf(input, "%ld", &DIMACS_lit);
@@ -943,17 +944,82 @@ void list_push(list_t* list, clause_t* clause)
 
 // group related
 
-void group_init(group_t* group, group_id_t id)
+group_t* group_init(group_id_t id)
 {
+  group_t* group;
+
   if ((group = (group_t*)malloc(sizeof(group_t))) == NULL)
     error("cannot allocate group_t");
   group->id = id;
   group->first = (group->last = NULL);
+
+  return group;
 }
 
 void group_free(group_t* group)
 {
   ;
+}
+
+void pool_add_ass(ass_t* ass)
+{
+  // add assignment to pool
+  if (trail.pool->last == NULL)
+    {
+      trail.pool->first = (trail.pool->last = ass);
+      ass->prev = (ass->next = NULL);
+    }
+  else
+    {
+      trail.pool->last->next = ass;
+      ass->prev = trail.pool->last;
+      ass->next = NULL;
+      trail.pool->last = ass;
+    }
+  ass->head = trail.pool;
+}
+
+int queue(group_t* group, var_t* var, phase_t phase)
+{
+  ass_t* ass = var->trail_pos;
+
+  // check for conflict: 
+  // TODO: expand during implementation of propagation 
+  if ((group->id == MODEL) && 
+      (ass->phase != phase) &&
+      (ass->head->id == MODEL))
+    {
+      // a conflict between implied literals -- fatal
+      num_conflicts++;
+      report_UNSAT();
+    }
+  // remove the assignment from its current group
+  if (ass->next == NULL)
+    ass->head->last = ass->prev;
+  else
+    ass->next->prev = ass->prev;
+  if (ass->prev == NULL)
+    ass->head->first = ass->next;
+  else
+    ass->prev->next = ass->next;
+
+  // add assignment to new group
+  ass->phase = phase;
+  if (group->last == NULL)
+    {
+      group->first = (group->last = ass);
+      ass->prev = (ass->next = NULL);
+    }
+  else
+    {
+      ass->prev = group->last;
+      ass->next = NULL;
+      group->last->next = ass;
+      group->last = ass;
+    }
+  ass->head = group;
+
+  return 0;
 }
 
 // miscellaneous
@@ -1028,7 +1094,7 @@ void print_ass(ass_t* ass)
 
 void print_group(group_t* group)
 {
-  ass_t* temp_ass;
+  ass_t* ass;
 
   switch(group->id)
     {
@@ -1040,14 +1106,14 @@ void print_group(group_t* group)
       break;
     default:
       fprintf(stderr, "%lu ", group->id);
-    }
+    }  
   
-  temp_ass = group->first;
-  while(temp_ass != NULL)
+  ass = group->first;
+  while(ass != NULL)
     {
-      print_ass(temp_ass);
+      print_ass(ass);
       fprintf(stderr, " ");
-      temp_ass = temp_ass->next;
+      ass = ass->next;
     }
   fprintf(stderr, "\n");
 }
