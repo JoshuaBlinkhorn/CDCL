@@ -30,9 +30,12 @@
 #define POSITIVE 1
 #define NEGATIVE 0
 
-// highest decision level (indicates an avaliable decision)
-#define DEC_MAX ULONG_MAX
-#define MAX_VARS (ULONG_MAX / 2 - 1)
+// group ids
+#define POOL ULONG_MAX
+#define MODEL ULONG_MAX - 1
+
+// maximum number of variables handled at present
+#define MAX_VARS (ULONG_MAX / 2)
 
 // native type aliases
 typedef signed char truth_value_t;
@@ -41,15 +44,15 @@ typedef signed long int DIMACS_lit_t;
 typedef unsigned long int cnf_size_t;
 typedef unsigned long int varset_size_t; 
 typedef unsigned long int list_size_t;
-typedef unsigned long int dec_id_t;
+typedef unsigned long int group_id_t;
 
 // MAIN STRUCTURE OF DATA 
 
-struct dec {
-  dec_id_t id;
-  struct dec* next;
+struct group {
+  group_id_t id;
+  struct group* next;
   struct ass {
-    struct dec* head;
+    struct group* head;
     struct ass* prev;
     struct ass* next;
     struct var {
@@ -71,7 +74,7 @@ struct dec {
   } *first, *last;
 };
 
-typedef struct dec dec_t;
+typedef struct group group_t;
 typedef struct ass ass_t;
 typedef struct var var_t;
 typedef struct list list_t;
@@ -84,11 +87,11 @@ typedef struct lit lit_t;
 // its negation appears.
 
 typedef struct trail {
-  dec_t* pool;
-  dec_t* implied;
-  dec_t* head;
-  dec_t* current;
-  dec_t* conflict;
+  group_t* pool;
+  group_t* model;
+  group_t* root;
+  group_t* current;
+  group_t* conflict;
   ass_t* cursor;
 } trail_t;
 
@@ -107,7 +110,7 @@ typedef struct cnf {
 // the solver
 varset_size_t num_vars;
 cnf_t cnf;
-var_t* model;
+var_t* varset;
 trail_t trail;
 
 // stats
@@ -118,14 +121,14 @@ unsigned long num_unit_props = 0;
 unsigned long num_pure_props = 0;
 unsigned long num_redefinitions = 0;
 
-void dec_add_ass(dec_t* dec, ass_t* ass)
+void dec_add_ass(group_t* dec, ass_t* ass)
 {
   ass->head = dec;
   ass->next = dec->first;
   dec->first = ass;
 }
 
-void queue(dec_t* dec, var_t* var, phase_t phase)
+void queue(group_t* dec, var_t* var, phase_t phase)
 {
   ass_t* temp_ass = var->trail_pos;
   temp_ass->prev->next = temp_ass->next;
@@ -160,6 +163,10 @@ void list_free(list_t* list);
 void list_push(list_t* list, clause_t* datum);
 void list_print_clauses(list_t* list); // write when needed
 
+// group related
+void group_init(group_t* group, group_id_t id);
+void group_free(group_t* group);
+
 // assignment related
 //void assign(ass_t* lit);
 //void unassign(ass_t* lit);
@@ -177,8 +184,8 @@ void print_lit(lit_t* lit);
 void print_clause(clause_t* clause);
 void print_cnf();
 void print_ass(ass_t* ass);
-void print_watched_lits();
-void print_model();
+void print_list(list_t *list);
+void print_group(group_t* group);
 void print_trail();
 void print_stats();
 
@@ -233,26 +240,33 @@ void CDCL_init(char* DIMACS_filename)
     error("too many vars - maximum MAX_VARS");
  
   // INITIALISE SOLVER STRUCTURES
-  if ((model = (var_t*)malloc(sizeof(var_t) * num_vars)) == NULL)
-	error("cannot allocate model");
+  // varset
+  if ((varset = (var_t*)malloc(sizeof(var_t) * num_vars)) == NULL)
+	error("cannot allocate varset");
+  // lists
+  
 
   // initialise pool group and default assignments
   // initially the pool contains all variables
-  if ((trail.pool = (dec_t*)malloc(sizeof(dec_t))) == NULL)
-    error("cannot allocate dec_t pool");
+  group_init(trail.pool, POOL);
 
   for (which_var = 0; which_var < num_vars; which_var++)
     {
+      // initialise default assignment
       ass = (ass_t*)malloc(sizeof(ass_t));
-      ass->var = model + which_var;
+      ass->var = varset + which_var;
       ass->phase = POSITIVE;
       dec_add_ass(trail.pool, ass);
-      model[which_var].trail_pos = ass;
+      varset[which_var].trail_pos = ass;
+      // initialise lists
+      list_init(&(varset[which_var].pos_watched));
+      list_init(&(varset[which_var].neg_watched));
+      list_init(&(varset[which_var].pos_all));
+      list_init(&(varset[which_var].neg_all));
     }
-  
-  // initialise implied literal group
-  if ((trail.implied = (dec_t*)malloc(sizeof(dec_t))) == NULL)
-    error("cannot allocate dec_t pool");
+
+  // initialise model group
+  group_init(trail.model, MODEL);
 
   // READ CNF
   // read number of clauses
@@ -295,7 +309,7 @@ void CDCL_init(char* DIMACS_filename)
       if (width == 1)
 	{
 	  fscanf(input, "%ld", &DIMACS_lit);
-	  queue(trail.implied, DIMACS_to_var(DIMACS_lit), DIMACS_to_phase(DIMACS_lit));
+	  queue(trail.model, DIMACS_to_var(DIMACS_lit), DIMACS_to_phase(DIMACS_lit));
 	  fscanf(input, "%ld", &DIMACS_lit);
 	  // we do not store unit clauses, so decrement counters
 	  // TODO: cnf.size is probably inessential
@@ -327,6 +341,27 @@ void CDCL_init(char* DIMACS_filename)
 	  else list_push(&((lit->var)->neg_watched), clause);
 	}
     }
+}
+
+void CDCL_print()
+{
+  varset_size_t which_var;
+
+  print_cnf();
+  for (which_var = 0; which_var < num_vars; which_var++)
+    {
+      fprintf(stderr, "Variable %lu:\n", which_var + 1);
+      fprintf(stderr, "positive watched:\n");
+      print_list(&varset[which_var].pos_watched);
+      fprintf(stderr, "negative watched:\n");
+      print_list(&varset[which_var].neg_watched);
+      fprintf(stderr, "positive all:\n");
+      print_list(&varset[which_var].pos_all);
+      fprintf(stderr, "negative all:\n");
+      print_list(&varset[which_var].neg_all);
+      fprintf(stderr, "\n");
+    }
+  print_trail();
 }
 
 /*
@@ -668,17 +703,6 @@ void clause_free(clause_t* clause)
 
 // cnf related
 
-void print_cnf()
-{
-  cnf_size_t which_clause;
-  
-  fprintf(stderr, "FORMULA:\n");
-  for(which_clause = 0; which_clause < cnf.size; which_clause++)
-    {
-      print_clause(cnf.clauses + which_clause);
-      fprintf(stderr, "\n");
-    }
-}
 
 // mutable related
 
@@ -832,29 +856,6 @@ void print_model()
 }
 
 
-void print_trail()
-{
-  ass_t** temp_pointer;
-  model_size_t which_var, dec_level;
-
-  fprintf(stderr, "TRAIL:\n");
-
-  for(which_var = 0, temp_pointer = trail.sequence; which_var < num_vars; which_var++, temp_pointer++)
-    {
-      fprintf(stderr, "%lu: %ld / ",
-	      which_var + 1,
-	      lit_to_DIMACS(*(temp_pointer)));
-
-      if ((*temp_pointer)->dec_level == DEC_MAX)
-	fprintf(stderr, "M");
-      else
-	fprintf(stderr, "%lu", (*temp_pointer)->dec_level);
-      if (temp_pointer == trail.head) fprintf(stderr, " HEAD");
-      if (temp_pointer == trail.tail) fprintf(stderr, " TAIL");
-      fprintf(stderr, "\n");
-    }
-  fprintf(stderr, "\n");
-}
 
 
 */
@@ -863,7 +864,7 @@ void print_trail()
 
 var_t* DIMACS_to_var(DIMACS_lit_t DIMACS_lit)
 {
-  return  model + ((DIMACS_lit < 0 ? -1 : 1) * DIMACS_lit) - 1;
+  return  varset + ((DIMACS_lit < 0 ? -1 : 1) * DIMACS_lit) - 1;
 }
 
 phase_t DIMACS_to_phase(DIMACS_lit_t DIMACS_lit)
@@ -873,12 +874,12 @@ phase_t DIMACS_to_phase(DIMACS_lit_t DIMACS_lit)
 
 DIMACS_lit_t lit_to_DIMACS(lit_t* lit)
 {
-  return (DIMACS_lit_t)((lit->var - model) + 1) * (lit->phase == POSITIVE ? 1 : -1);
+  return (DIMACS_lit_t)((lit->var - varset) + 1) * (lit->phase == POSITIVE ? 1 : -1);
 }
 
 DIMACS_lit_t ass_to_DIMACS(ass_t* ass)
 {
-  return (DIMACS_lit_t)((ass->var - model) + 1) * (ass->phase == POSITIVE ? 1 : -1);
+  return (DIMACS_lit_t)((ass->var - varset) + 1) * (ass->phase == POSITIVE ? 1 : -1);
 }
 
 // clause related
@@ -940,6 +941,21 @@ void list_push(list_t* list, clause_t* clause)
     }
 }
 
+// group related
+
+void group_init(group_t* group, group_id_t id)
+{
+  if ((group = (group_t*)malloc(sizeof(group_t))) == NULL)
+    error("cannot allocate group_t");
+  group->id = id;
+  group->first = (group->last = NULL);
+}
+
+void group_free(group_t* group)
+{
+  ;
+}
+
 // miscellaneous
 
 void error(char* message)
@@ -981,6 +997,18 @@ void print_clause(clause_t* clause)
     }
 }
 
+void print_cnf()
+{
+  cnf_size_t which_clause;
+  
+  fprintf(stderr, "FORMULA:\n");
+  for(which_clause = 0; which_clause < cnf.size; which_clause++)
+    {
+      print_clause(cnf.clauses + which_clause);
+      fprintf(stderr, "\n");
+    }
+}
+
 void print_list(list_t *list)
 {
   cnf_size_t which_clause, num_clauses = list->used;
@@ -993,7 +1021,49 @@ void print_list(list_t *list)
     }
 }
 
-void  print_stats()
+void print_ass(ass_t* ass)
+{
+  fprintf(stderr, "%ld", ass_to_DIMACS(ass));
+}
+
+void print_group(group_t* group)
+{
+  ass_t* temp_ass;
+
+  switch(group->id)
+    {
+    case POOL:
+      fprintf(stderr, "P ");
+      break;
+    case MODEL:
+      fprintf(stderr, "M ");
+      break;
+    default:
+      fprintf(stderr, "%lu ", group->id);
+    }
+  
+  temp_ass = group->first;
+  while(temp_ass != NULL)
+    {
+      print_ass(temp_ass);
+      fprintf(stderr, " ");
+      temp_ass = temp_ass->next;
+    }
+  fprintf(stderr, "\n");
+}
+
+void print_trail()
+{
+  // print model
+  print_group(trail.model);
+
+  // print pool
+  print_group(trail.pool);
+
+  // print rest of trail
+}
+
+void print_stats()
 {
   fprintf(stderr, "Conflicts:         %lu\n", num_conflicts);
   fprintf(stderr, "Decisions:         %lu\n", num_decisions);
@@ -1003,3 +1073,4 @@ void  print_stats()
   fprintf(stderr, "%1.1zdMb ", getPeakRSS() / 1048576);
   fprintf(stderr, "\n");
 }
+
