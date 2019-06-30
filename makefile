@@ -3,7 +3,7 @@ Flags=-Wall -Wpedantic
 
 all: executable
 	
-debug: Flags += -DDEBUG
+debug: Flags += -DVERBOSE -DASSERT -DTIDY
 debug: objects
 debug: executable
 

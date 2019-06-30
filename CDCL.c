@@ -16,23 +16,29 @@
 #include <math.h>
 #include <limits.h>
 #include <time.h>
+#include <assert.h>
 #include "getRSS.c"
 
+
 // enable debugging
-#ifdef DEBUG
-#define DEBUG_MSG(x) (x)
+#ifdef VERBOSE
+#define VERBOSE_(x) (x)
 #else
-#define DEBUG_MSG(x) 
+#define VERBOSE_(x) 
 #endif
 
-// TODO: debug this macro 
-/*
-#ifndef COMP
-#define CHECK(x) (x)
+#ifdef ASSERT
+#define ASSERT_(x) (x)
 #else
-#define CHECK(x) 
+#define ASSERT_(x) 
 #endif
-*/
+
+#ifdef TIDY
+#define TIDY_(x) (x)
+#else
+#define TIDY_(x) 
+#endif
+
 
 // MACROS
 
@@ -67,6 +73,7 @@ struct group {
     struct ass* next;
     struct var {
       struct ass* trail_pos;
+      cnf_size_t num_pos, num_neg;
       struct list {
 	list_size_t size;
 	list_size_t used;
@@ -102,7 +109,6 @@ typedef struct trail {
   group_t* root;
   group_t* current;
   group_t* conflict;
-  ass_t* cursor;
 } trail_t;
 
 // the trail stores a fixed-sized array of pointers to assignments, storing the
@@ -182,14 +188,20 @@ void print_group(group_t* group);
 void print_trail();
 void print_stats();
 
+// asserts
+void assert_literal_validity(DIMACS_lit_t DIMACS_lit);
+
+// to categorise
+void immortalise(ass_t* ass);
+
 // CDCL INTERFACE IMPLEMENTATION
 
 void CDCL_init(char* DIMACS_filename)
 {
   
-// initialises global solver according to the DIMACS file 'input'.
-// all data structures are initialised and all initial memory allocated
-// unit clauses found while reading the input are placed on the trail.
+  // initialises global solver according to the DIMACS file 'input'.
+  // all data structures are initialised and all initial memory allocated
+  // unit clauses found while reading the input are placed on the trail.
 
   FILE* input, *cursor;
   char buffer[5]; // used only to read the `cnf' string from the input file
@@ -203,6 +215,7 @@ void CDCL_init(char* DIMACS_filename)
   var_t* var;
 
   start_time = clock();
+  VERBOSE_(fprintf(stderr, "In CDCL_init()..\n"));
 
   // open file connections
   // TODO: currently using two file connections to find size of clauses before writing
@@ -293,8 +306,7 @@ void CDCL_init(char* DIMACS_filename)
       for(width = 0; DIMACS_lit != 0; width++) 
 	{
 	  // TODO: enclose in check macro
-	  if((((DIMACS_lit < 0 ? -1 : 1) * DIMACS_lit) - 1) >= num_vars)
-	    error("bad input - literal magnitude larger than num vars");
+	  ASSERT_(assert_literal_validity(DIMACS_lit));
 	  fscanf(cursor, "%ld", &DIMACS_lit);
 	}
 
@@ -308,9 +320,9 @@ void CDCL_init(char* DIMACS_filename)
       // if the width is 1, add the assignment as an implied unit propagation
       if (width == 1)
 	{
-	  num_unit_props++;
 	  fscanf(input, "%ld", &DIMACS_lit);
-	  queue(trail.model, DIMACS_to_var(DIMACS_lit), DIMACS_to_phase(DIMACS_lit));
+	  if (queue(trail.model, DIMACS_to_var(DIMACS_lit), DIMACS_to_phase(DIMACS_lit)))
+	    num_unit_props++;
 	  fscanf(input, "%ld", &DIMACS_lit);
 	  // we do not store unit clauses, so decrement counters
 	  // TODO: cnf.size is probably inessential
@@ -342,13 +354,150 @@ void CDCL_init(char* DIMACS_filename)
 	  else list_push(&((lit->var)->neg_watched), clause);
 	}
     }
+
+  // IDENTIFY PURE LITERALS
+  // cycle through variables
+  for (which_var = 0; which_var < num_vars; which_var++)
+    {
+      var = varset + which_var;
+      // if positive literal is pure, queue it, if not queed already
+      // n.b. the literal may be `pure (as in num_pos == 0)' even when its negation
+      // was unit, since that unit clause was not added to the CNF
+      if ((var->num_pos = var->pos_all.used) == 0 && var->trail_pos->head != trail.model)
+	  if (queue(trail.model, varset + which_var, NEGATIVE)) num_pure_props++;
+      // do same for negative literal
+      if ((var->num_neg = var->neg_all.used) == 0 && var->trail_pos->head != trail.model)	 
+	  if (queue(trail.model, varset + which_var, POSITIVE)) num_pure_props++; 
+    }
+  
+  // PREPROCESS
+  ass = trail.model->first;
+  while(ass != NULL)
+    {
+      immortalise(ass);
+      ass = ass->next;
+    }
+  if (trail.pool->first == NULL)
+    report_SAT();
+}
+
+void immortalise(ass_t* ass)
+{
+  // 1. Deletes all clauses satisfied by the current assignment,
+  // and queues any resulting pure propagations.
+  // 2. Swaps for each watched clause are attempted,
+  // queueing any resulting unit propagations.
+
+  VERBOSE_(fprintf(stderr, "In immortalise()..\n"));
+  
+  list_t* all, * watched;
+  clause_t** clauses;
+  clause_t* clause;
+  lit_t* lit;
+  var_t* var, * unit_var;
+  cnf_size_t which_clause, num_clauses;
+  varset_size_t which_lit, num_lits;
+  lit_t temp_lit;
+
+  // get the appropriate lists
+  var = ass->var;
+  if (ass->phase == POSITIVE) 
+    {
+      all = &(var->pos_all);
+      watched = &(var->neg_watched);
+    }
+  else
+    {
+      all = &(var->neg_all);
+      watched = &(var->pos_watched);
+    }
+
+  // 1. Delete the clauses satisfied by the assignment 
+
+  // cycle through clauses
+  clauses = all->clauses;
+  num_clauses = all->used;
+  for (which_clause = 0; which_clause < num_clauses; which_clause++)
+    {
+      // ignore dead clauses
+      if ((clause = clauses[which_clause])->width != 0)
+	{
+	  // cycle through each literal in clause
+	  num_lits = clause->width;
+	  for (which_lit = 0; which_lit < num_lits; which_lit++)
+	    {
+	      // ignore a literal if an assignment to it is already queued
+	      // TODO: can a pure propagation induce a `phony' conflict?
+	      // if not, we can just queue the assignment ..
+	      if ((var = (lit = clause->lits + which_lit)->var)->trail_pos->head != 
+		  trail.model)
+		{	    
+		  // decrement literal counter; if it hits 0, the literal is pure -
+		  // so complementary assignment is queued
+		  if (lit->phase == POSITIVE && --(var = lit->var)->num_pos == 0)
+		    {
+		      num_pure_props++;
+		      queue(trail.model, var, NEGATIVE);
+		    }
+		  else if (--(var = lit->var)->num_neg == 0)
+		    {
+		      num_pure_props++;
+		      queue(trail.model, var, POSITIVE);
+		    }
+		}
+	    }
+	  // kill the clause; 0 width indicates a dead clause
+	  // (unit and empty clauses are never stored)
+	  clause->width = 0;
+	}
+    }
+  // free the memory for the list
+  free(all->clauses);
+  TIDY_(all->clauses = NULL);
+  TIDY_(all->size = (all->used = (all->at = 0)));
+  
+  // 2. visit the watched clauses for the assignment, and swap watches
+  
+  // cycle through clauses
+  clauses = watched->clauses;
+  num_clauses = watched->used;
+  for (which_clause = 0; which_clause < num_clauses; which_clause++)
+    {
+      // clauses of size 2 become unit
+      if ((num_lits = (clause = clauses[which_clause])->width) == 2)
+	{
+	  // queue unit assignment
+	  if ((unit_var = (lit = clause->lits)->var) == var)
+	      unit_var = (lit = clause->lits + 1)->var;
+	  if (queue(trail.model, unit_var, lit->phase)) num_unit_props++;
+	  // delete clause
+	  clause->width = 0;
+	}
+
+      // ignore dead clauses
+      else if (num_lits > 2)
+	{
+	  // swap watched literal with last literal and decrement clause width
+	  if ((lit = clause->lits)->var != var)
+	    lit = clause->lits + 1;
+	  temp_lit = *lit;
+	  *lit = clause->lits[num_lits - 1];
+	  clause->lits[num_lits - 1] = temp_lit;		  
+	  clause->width--;
+	}
+    }
+  // free the memory for the list
+  free(watched->clauses);
+  TIDY_(watched->clauses = NULL);
+  TIDY_(watched->size = (watched->used = (watched->at = 0)));
 }
 
 void CDCL_print()
 {
-  varset_size_t which_var;
+  //varset_size_t which_var;
 
   print_cnf();
+  /*
   for (which_var = 0; which_var < num_vars; which_var++)
     {
       fprintf(stderr, "Variable %lu:\n", which_var + 1);
@@ -362,7 +511,9 @@ void CDCL_print()
       print_list(&varset[which_var].neg_all);
       fprintf(stderr, "\n");
     }
+  */
   print_trail();
+  print_stats();
 }
 
 /*
@@ -410,7 +561,7 @@ void CDCL_prop()
   clause_t* clause;
   model_size_t dec_level;
 
-  DEBUG_MSG(fprintf(stderr, "In CDCL_prop()..\n"));
+  VERBOSE_(fprintf(stderr, "In CDCL_prop()..\n"));
   
   while (trail.head != trail.tail)
     {
@@ -420,8 +571,8 @@ void CDCL_prop()
       
       // add the propagating assignment to the model, set all successive additions
       // as propagations
-      DEBUG_MSG(print_model());
-      DEBUG_MSG(print_trail());
+      VERBOSE_(print_model());
+      VERBOSE_(print_trail());
       
       // make a local pointer to the list of watched literals, and get the list size 
       data = propagator->watched_lits.data;
@@ -430,7 +581,7 @@ void CDCL_prop()
       // initialise a new mutable for the replacement list
       mutable_init(&new_watchers);
 
-      DEBUG_MSG(fprintf(stderr, "Propagating literal %ld on %lu clauses\n",
+      VERBOSE_(fprintf(stderr, "Propagating literal %ld on %lu clauses\n",
 			lit_to_DIMACS(propagator), num_clauses));
       
       // cycle through the watched literals' clauses
@@ -451,9 +602,9 @@ void CDCL_prop()
 		  lits[1] = temp_lit;		  
 		}
 
-	      DEBUG_MSG(fprintf(stderr, "Dealing with clause: "));
-	      DEBUG_MSG(print_clause(clause));
-	      DEBUG_MSG(fprintf(stderr, " -> "));
+	      VERBOSE_(fprintf(stderr, "Dealing with clause: "));
+	      VERBOSE_(print_clause(clause));
+	      VERBOSE_(fprintf(stderr, " -> "));
 	      
 	      // the first case to deal with: the other watched literal is POSITIVE
 	      // and its decision level is no larger than propagation dec level
@@ -474,8 +625,8 @@ void CDCL_prop()
 		      
 		      clause->width = 0;
 		      
-		      DEBUG_MSG(fprintf(stderr, "clause deleted"));
-		      DEBUG_MSG(fprintf(stderr, 
+		      VERBOSE_(fprintf(stderr, "clause deleted"));
+		      VERBOSE_(fprintf(stderr, 
 					" (other watched literal is dec level 0)\n"));
 		    }
 		  else
@@ -483,8 +634,8 @@ void CDCL_prop()
 		      // otherwise, preserve the watched literal
 		      mutable_push(&new_watchers, clause);
 		      
-		      DEBUG_MSG(print_clause(clause));
-		      DEBUG_MSG(fprintf(stderr, 
+		      VERBOSE_(print_clause(clause));
+		      VERBOSE_(fprintf(stderr, 
 					" (no change - other watched literal is satisfied)\n"));
 		    }
 		}
@@ -503,7 +654,7 @@ void CDCL_prop()
 		  if (candidate == clause->width)
 		    {
 		      num_unit_props++; // TODO: increment here or when processed?
-		      DEBUG_MSG(fprintf(stderr, "found unit clause %ld",
+		      VERBOSE_(fprintf(stderr, "found unit clause %ld",
 					lit_to_DIMACS(lits[1])));
 		      
 		      // preserve the propagator as watched literal for this clause
@@ -513,7 +664,7 @@ void CDCL_prop()
 			{
 			  // the propagated assignment yields a conflict
 			  num_conflicts++;
-			  DEBUG_MSG(fprintf(stderr,
+			  VERBOSE_(fprintf(stderr,
 					    " -- detected conflict.\n"));
 			  
 			  // at level 0 the conflict is fatal
@@ -542,18 +693,18 @@ void CDCL_prop()
 			  // the solution, since we increment the head later in all 
 			  // cases TODO: is there a better solution?
 			  trail.head--;
-			  DEBUG_MSG(print_model());
-			  DEBUG_MSG(print_trail());
+			  VERBOSE_(print_model());
+			  VERBOSE_(print_trail());
 			}
 		      else if (lits[1]->trail_pos != NULL && lits[1]->trail_pos < trail.tail) 
 			{
-			  DEBUG_MSG(fprintf(stderr, " (ignoring repeated unit clause)\n"));
+			  VERBOSE_(fprintf(stderr, " (ignoring repeated unit clause)\n"));
 			}
 		      else
 			{
 			  // queue the unit literal at the current decision level
 			  trail_queue_lit(lits[1], dec_level);
-			  DEBUG_MSG(fprintf(stderr,
+			  VERBOSE_(fprintf(stderr,
 					    " -- added to trail.\n"));
 			}
 		    }
@@ -569,8 +720,8 @@ void CDCL_prop()
 		      mutable_push(&(get_comp_lit(lits[0])->watched_lits),
 				   clause);
 		      
-		      DEBUG_MSG(print_clause(clause));
-		      DEBUG_MSG(fprintf(stderr, "\n"));		      
+		      VERBOSE_(print_clause(clause));
+		      VERBOSE_(fprintf(stderr, "\n"));		      
 		    }
 		}
 	    }
@@ -583,16 +734,16 @@ void CDCL_prop()
       // increment head
       trail.head++;
 
-      DEBUG_MSG(fprintf(stderr,
+      VERBOSE_(fprintf(stderr,
 			"Completed propagation on literal %ld.\n",
 			lit_to_DIMACS(propagator)));
-      //DEBUG_MSG(print_watched_lits());
+      //VERBOSE_(print_watched_lits());
     }
 
   // propagation terminates
-  DEBUG_MSG(fprintf(stderr,"Propagation cycle complete.\n"));
-  DEBUG_MSG(print_model());
-  DEBUG_MSG(print_trail());
+  VERBOSE_(fprintf(stderr,"Propagation cycle complete.\n"));
+  VERBOSE_(print_model());
+  VERBOSE_(print_trail());
   return;
 }
 		  
@@ -607,7 +758,7 @@ void CDCL_decide()
   model_size_t which_var;
   model_size_t dec_level;
 
-  DEBUG_MSG(fprintf(stderr, "In CDCL_decide(). "));
+  VERBOSE_(fprintf(stderr, "In CDCL_decide(). "));
 
   if (trail.head == trail.sequence + num_vars)
     {
@@ -623,10 +774,10 @@ void CDCL_decide()
       trail_queue_lit(*trail.head, (*(trail.head - 1))->dec_level + 1);
     }
 
-  DEBUG_MSG(fprintf(stderr, "Made decision %lu.\n",
+  VERBOSE_(fprintf(stderr, "Made decision %lu.\n",
 		    lit_to_DIMACS(*trail.head)));
-  DEBUG_MSG(print_model());
-  DEBUG_MSG(print_trail());
+  VERBOSE_(print_model());
+  VERBOSE_(print_trail());
   
   // find an unassigned var
   //for (which_var = 0; which_var < num_vars; which_var++)
@@ -921,6 +1072,8 @@ void list_free(list_t* list)
 {
   // frees only the data of the pointed to list
   free(list->clauses);
+  list->clauses = NULL;
+  list->size = (list->used = (list->at = 0));
 }
 
 void list_push(list_t* list, clause_t* clause)
@@ -983,6 +1136,16 @@ int queue(group_t* group, var_t* var, phase_t phase)
 {
   ass_t* ass = var->trail_pos;
 
+  VERBOSE_(fprintf(stderr, "In queue(): "));
+  VERBOSE_(fprintf(stderr, "queueing variable %ld in phase %d\n",
+		   var - varset + 1,
+		   phase));
+  VERBOSE_(print_stats());
+
+  // if  assignment is already in model, ignore and return 0:
+  if (var->trail_pos->head == trail.model && var->trail_pos->phase == phase)
+    return 0;
+
   // check for conflict: 
   // TODO: expand during implementation of propagation 
   if ((group->id == MODEL) && 
@@ -1018,8 +1181,9 @@ int queue(group_t* group, var_t* var, phase_t phase)
       group->last = ass;
     }
   ass->head = group;
-
-  return 0;
+  
+  // indicate that queueing was successful
+  return 1;
 }
 
 // miscellaneous
@@ -1032,13 +1196,14 @@ void error(char* message)
 
 void report_SAT()
 {
-  //print_model();
+  VERBOSE_(print_trail());
   fprintf(stderr, "v SAT\n");
   print_stats();
   exit(0);
 }
 void report_UNSAT()
 {
+  VERBOSE_(print_trail());
   fprintf(stderr, "v UNSAT\n");
   print_stats();
   exit(0);
@@ -1134,9 +1299,20 @@ void print_stats()
   fprintf(stderr, "Conflicts:         %lu\n", num_conflicts);
   fprintf(stderr, "Decisions:         %lu\n", num_decisions);
   fprintf(stderr, "Unit Propagations: %lu\n", num_unit_props);
-  //fprintf(stderr, "Redefinitions:     %lu\n", num_redefinitions);
+  fprintf(stderr, "Pure Propagations: %lu\n", num_pure_props);
   fprintf(stderr, "%1.1lfs ", ((double)(clock() - start_time)) / CLOCKS_PER_SEC);
   fprintf(stderr, "%1.1zdMb ", getPeakRSS() / 1048576);
   fprintf(stderr, "\n");
 }
 
+// asserts
+
+void assert_literal_validity(DIMACS_lit_t DIMACS_lit)
+{
+  if ((((DIMACS_lit < 0 ? -1 : 1) * DIMACS_lit) - 1) >= num_vars)
+    {
+      error("bad input: literal magnitude exceeds number of variables");
+      exit(1);
+    }
+  ;
+}

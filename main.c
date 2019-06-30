@@ -9,7 +9,8 @@
 int main(int argc, char** argv)
 {  
   CDCL_init(argv[1]);
-  CDCL_print();
+  //CDCL_print();
+
   /*
   while(1)
     {
