@@ -15,7 +15,7 @@ void CDCL_prop();
 // them to the model and trail, until none remain
 
 void CDCL_decide();
-// looks for a single unit clause, and returns the fist it finds, or NULL if
+// looks for a single unit clause, and returns the first it finds, or NULL if
 // none is to be found
 
 void CDCL_print();

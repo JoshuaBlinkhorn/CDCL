@@ -64,32 +64,75 @@ typedef unsigned long int group_id_t;
 
 // MAIN STRUCTURE OF DATA 
 
-struct group {
+// The fundamental objects are all structures
+// Due to the double referencing, they are defined
+// in the following nested fashion 
+
+// Group 
+//   Assignment
+//     Variable
+//       List
+//         Clause
+//           Literal
+
+struct group { 
+  // BEGIN GROUP DEFINITION
+  // a unique identifier for the group
   group_id_t id;
+  // pointer to the following group
   struct group* next;
-  struct ass {
+  // pointers to the first and last assignments in the group
+  struct ass { 
+    // BEGIN ASSIGNMENT DEFINITION
+    // pointer to the group  
     struct group* head;
+    // pointers to the preceding and following assignments
     struct ass* prev;
     struct ass* next;
-    struct var {
+    // pointer to the variable 
+    struct var { 
+      // BEGIN VARIABLE DEFINITION
+      // pointer to the assignment TODO: should be called `ass'
       struct ass* trail_pos;
+      // the number of positive/negative literals appearing in the current CNF
       cnf_size_t num_pos, num_neg;
+      // pointers to complete lists and watched lists for both literal polarities
       struct list {
+	// BEGIN LIST DEFINITION
+	// maximum number of list entries
 	list_size_t size;
+	// number of currently used list entries
 	list_size_t used;
+	// TODO: describe this
 	list_size_t at;
-	struct clause {
+	// the clauses in the list
+	struct clause { 
+	  // BEGIN CLAUSE DEFINITION
+	  // number of literals
 	  varset_size_t width;
+	  // pointer to first literal in clause
 	  struct lit {
+	    // BEGIN LITERAL DEFINITION
+	    // pointer to variable
 	    struct var* var;
+	    // literal polarity
 	    phase_t phase;	    
-	  } *lits;
-	} **clauses;    
+	    // END LITERAL DEFINITION
+	  } *lits; 
+	  // END CLAUSE DEFINITION
+	} **clauses;     
+	//END LIST DEFINITION
       } pos_all, neg_all, pos_watched, neg_watched;
+      // END VARIABLE DEFINITION
     } *var;
+    // assignment phase
     phase_t phase;
+    // END ASSIGNMENT DEFINITION
   } *first, *last;
-};
+  // END GROUP DEFINITION
+}; 
+
+// structure typedefs
 
 typedef struct group group_t;
 typedef struct ass ass_t;
@@ -97,6 +140,9 @@ typedef struct var var_t;
 typedef struct list list_t;
 typedef struct clause clause_t;
 typedef struct lit lit_t;
+
+// TODO: is the following description true? perhaps write better descriptions for
+// each object.
 
 // assignments are the main objects, which are treated implicitly in one-to-one 
 // correspondence with literals. A clause is a fixed size list of pointers to
